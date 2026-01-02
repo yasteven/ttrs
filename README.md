@@ -2,7 +2,13 @@
 
 A comprehensive, high-performance Rust client library for the Tastytrade API. Built from scratch with async-first design, robust connection management, and targeting complete API coverage.
 
-**Current Status**: 0.8.0 (Integration Testing) → 0.9.0 (Stabilization) → 1.0.0 (Production Ready)
+**Current Status**: 0.8.1 (Integration Testing) → 0.9.0 (Stabilization) → 1.0.0 (Production Ready)
+
+Change Status
+
+0.8.1: fixed a bug that prevented proper ticker subscriptions when using options streamer symbols
+
+0.8.2: TODO: will check rate settings for streaming
 
 ---
 

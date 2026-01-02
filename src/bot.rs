@@ -193,6 +193,25 @@ impl Thand // NOTE: although these functions are provided for convienence, optim
   }
   pub async fn tell_tastytrade_to_place_order(&self, acct: String, order: OrderRequest) -> Result<OrderResponse> 
   { let (resp_tx, resp_rx) = oneshot::channel();
+    if true
+    { log::warn!("TTRS is in debug mode - calls a dry run order whenever we do a order request");
+      match self.tell_tastytrade_to_dry_run_order
+      ( acct.clone() // String
+      , order.clone() // : OrderRequest
+      ).await // -> Result<DryRunData> 
+      { Ok(ok) => 
+        { log::info!
+          ( "\n\n\n\n     ================{}{}    ==================\n\n\n\n"
+          , " \n\n\n\n TTRS dry run result \n"
+          , format!("{:#?}\n\n\n\n",ok) 
+          );
+        }
+        Err(e) =>
+        { log::error!("Gonna panic because ttrs failed a debug requirment to request dryrun: {:#?}", e);
+          panic!("Shit's fucked up");
+        }
+      }
+    }
     self.req_order_place_tx
         .send((acct, order, resp_tx))
         .await?;
@@ -446,6 +465,17 @@ fn url_encode(input: &str) -> String
         .collect()
 }
 
+// Helper to detect equity option streamer symbols (e.g., .SPY260107P681)
+fn is_equity_option_streamer(sym: &str) -> bool {
+    if !sym.starts_with('.') {
+        return false;
+    }
+    let stripped = &sym[1..];
+    // Regex: root (letters) + 6 digits + P/C + digits (strike)
+    let re = regex::Regex::new(r"^[A-Z]+(\d{6}[PC])\d+$").unwrap();
+    re.is_match(stripped)
+}
+
 async fn fetch_streamer_symbol
 (   http: &Client
   , shared_token: Arc<Mutex<Option<AccessToken>>>
@@ -459,6 +489,14 @@ async fn fetch_streamer_symbol
     , &conn.oauth
     , shared_token
   ).await?;
+
+    // NEW: Early return for equity option streamer symbols (bypass lookup)
+    if is_equity_option_streamer(sym) {
+      // where is my request to the equities options?
+        log::debug!("Detected equity option streamer symbol '{}'; bypassing instrument lookup (valid dxfeed format)", sym);
+        return Ok(sym.to_string());
+    }
+
 
   // ---- fetch_streamer_symbol UNIVERSAL ROUTING (subject to change) ----
   let url = if sym.starts_with('/') 
@@ -699,7 +737,13 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, TradingStatusResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+            if !resp.extra.is_empty() 
+            { log::warn!
+              ( "TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! \n  {}\n  {:#?}"
+              , resp.context
+              , resp.extra
+              );
+            }
             Ok(resp.data)
           }
           , resp_tx, error_tx_clone2, "get_trading_status"
@@ -711,7 +755,13 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, BalancesResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}" , resp);}
+            if !resp.extra.is_empty() 
+            { log::warn!
+              ( "TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! \n  {}\n  {:#?}"
+              , resp.context
+              , resp.extra
+              );
+            }
             Ok(resp.data)
           }
           , resp_tx, error_tx_clone2, "get_balances"
@@ -723,7 +773,14 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, TransactionsResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+            if !resp.extra.is_empty() 
+            { log::warn!
+              ( "TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! \n  {}\n  {:#?}\n  {:#?}"
+              , resp.context
+              , resp.extra
+              , resp.pagination
+              );
+            }
             Ok(resp.data.items)
           }
           , resp_tx, error_tx_clone2, "get_transactions"
@@ -735,7 +792,7 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, LiveOrdersResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            //if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?} {}", resp, resp.context);}
+            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?} {:#?}", resp, resp.data.context);}
             Ok(resp.data.items)
           }
           , resp_tx, error_tx_clone2, "get_live_orders"
@@ -808,7 +865,13 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, CustomerAccountsResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+            if !resp.extra.is_empty() 
+            { log::warn!
+              ( "TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! \n  {}\n  {:#?}"
+              , resp.context
+              , resp.extra
+              );
+            }
             Ok(resp.data)
           }
           , resp_tx, error_tx_clone2, "get_accountss"
@@ -820,7 +883,13 @@ pub async fn fn_run_core
         spawn_api_task_safe
         ( async move 
           { let resp = api_req!(GET, url, PositionsResponse, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+            if !resp.extra.is_empty() 
+            { log::warn!
+              ( "TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! \n  {}\n  {:#?}"
+              , resp.context
+              , resp.extra
+              );
+            }
             Ok(resp.data.items)
           }
           , resp_tx, error_tx_clone2, "get_positions"
@@ -830,14 +899,20 @@ pub async fn fn_run_core
       // ===== SIMPLE POST HANDLERS =====
       Some((acct, order, resp_tx)) = tfoot.place_order.recv() => 
       { let url = format!("{}/accounts/{}/orders", conn.base_url, acct);
-        spawn_api_task_safe
-        ( async move 
-          { let resp = api_req!(POST, url, order, OrderSubmitResp, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-            if !resp.data.order.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
-            Ok(resp.data.order)
-          }
-          , resp_tx, error_tx_clone2, "place_order"
-        );
+        if true
+        { log::warn!("ttrs core library is in SAFE DEBUG mode, we will not do any order requests ");
+          panic!("If you reached this point, good job, time to debug");
+        }
+        else
+        { spawn_api_task_safe
+          ( async move 
+            { let resp = api_req!(POST, url, order, OrderSubmitResp, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
+              if !resp.data.order.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+              Ok(resp.data.order)
+            }
+            , resp_tx, error_tx_clone2, "place_order"
+          );
+        }
       }
 
       Some((acct, order, resp_tx)) = tfoot.dry_run.recv() => 
@@ -918,6 +993,13 @@ pub async fn fn_run_core
             { format!("{}/option-chains/{}/nested", conn.base_url, underlying)
             };
             let resp = api_req!(GET, chain_url, OptionChainResponse, http, shared_token, conn.base_url, conn.oauth, error_tx);
+            if !resp.extra.is_empty()
+            { log::warn!
+              ( "TTRS detected un-processed extra data in get_option_chain;\n  {}\n  {}"
+              , format!("resp.context = {:#?}", resp.context)
+              , format!("resp.extra = {:#?}", resp.extra)
+              );
+            }
             Ok(resp.data)
           }
           , resp_tx, error_tx_clone2, "get_option_chain"
@@ -1295,9 +1377,17 @@ async fn ticker_loop
                               let _ = tx.send(StreamData::Trade(trade)).await;
                               log::trace!("TTRS_TL: Forwarded Trade for {user_sym}");
                             }
+                            else
+                            { let msg = format!
+                              ( "TTRS_TL: Trade parse EMPTY ROUTE:raw={inner_val:?}"
+                              );
+                              log::warn!("{msg}");
+                            }
                           }
                           Err(e) =>
-                          { let msg = format!("TTRS_TL: Trade parse FAILURE: {e} | raw={inner_val:?}");
+                          { let msg = format!
+                            ( "TTRS_TL: Trade parse FAILURE: {e} | raw={inner_val:?} "
+                            );
                             log::error!("{msg}");
                             let _ = error_tx.send(CoreError::ParseFailure(msg));
                           }

@@ -111,7 +111,7 @@ use std::collections::HashMap;
 // RawTrade maps to ["Trade", symbol, event_id, time, sequence, trade_day, exchange_code, price, change, size, day_id, day_volume, day_turnover, direction, is_eth]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawTrade
-( String, // "Trade"
+( pub String, // "Trade"
   String, // symbol
   #[serde(deserialize_with = "de_f64_flex")]
   f64,    // event_id
@@ -140,7 +140,8 @@ pub(crate) struct RawTrade
 // Convert RawTrade -> StreamTrade 
 impl From<RawTrade> for StreamTrade 
 { fn from(r: RawTrade) -> Self 
-  { StreamTrade 
+  { log::trace!("Converting to {} RawTrade from StreamTrade",r.0);
+    StreamTrade 
     {   symbol:        r.1
       , event_id:      r.2
       , time:          r.3
@@ -192,7 +193,8 @@ pub(crate) struct RawSummary
 );
 impl From<RawSummary> for StreamSummary 
 { fn from(r: RawSummary) -> Self 
-  { StreamSummary 
+  { log::trace!("Converting to StreamSummary from RawSummary {}",r.0);
+    StreamSummary 
     {   symbol:        r.1
       , event_id:      r.2
       , day_id:        r.3
@@ -253,7 +255,8 @@ pub(crate) struct RawProfile
 
 impl From<RawProfile> for StreamProfile 
 { fn from(r: RawProfile) -> Self 
-  { StreamProfile 
+  { log::trace!("Converting to StreamProfile from RawProfile {}",r.0);
+    StreamProfile 
     {
       symbol: r.1,
       event_id: r.2,
@@ -289,7 +292,7 @@ pub(crate) struct RawQuoteBatch(pub String, pub Vec<Value>); // ("Quote", inner_
 impl RawQuoteBatch 
 { /// Convert the inner batched array into Vec<StreamQuote> 
   pub fn into_quotes(self) -> Vec<StreamQuote> 
-  {
+  { log::trace!("Converting to Vec<StreamQuote> from RawQuoteBatch {}",self.0);
     let mut out = Vec::new();
     let inner = self.1;
     let mut i = 0usize;
@@ -482,6 +485,8 @@ pub(crate) struct SingleOrderResponse
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LiveOrdersResponse 
 { pub data: LiveOrdersData,
+  #[serde(flatten)]
+  pub extra : HashMap<String,Value>
 }
 
 #[derive(Debug, Clone, Deserialize)]
