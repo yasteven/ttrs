@@ -44,10 +44,12 @@ async fn main() -> Result<()>
         legs: vec![OrderLeg {
             symbol: "AAPL".to_string(),
             action: "Buy to Open".to_string(),
-            quantity: 0.001,
-            instrument_type: "Equity".to_string(),
+            quantity: Some(0.001),
+            instrument_type: Some("Equity".to_string()),
             extra:std::collections::HashMap::new()
         }],
+        value: None,
+        value_effect: None,
         extra:std::collections::HashMap::new()
     };
     thand

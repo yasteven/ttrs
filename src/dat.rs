@@ -173,7 +173,7 @@ pub struct Position
   #[serde(rename = "account-number")]
   pub account_number: String,
   #[serde(rename = "instrument-type")]
-  pub instrument_type: String,
+  pub instrument_type: Option<String>,  
   #[serde(rename = "streamer-symbol")]
   pub streamer_symbol: String,
   pub symbol: String,
@@ -377,6 +377,7 @@ pub enum StreamData
   Trade(StreamTrade),
   Summary(StreamSummary),
   Profile(StreamProfile),
+  Greeks(StreamGreeks)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -504,6 +505,42 @@ pub struct StreamSummary
   // Single per message; map "NaN" to None.
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)] // for convienience
+pub struct StreamGreeks { 
+    pub symbol: String,
+
+    /// dxfeed eventTime — often 0 in tastytrade streams
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time: Option<f64>,
+
+    /// Model calculation timestamp in ms (the useful "big" timestamp)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calc_time: Option<f64>,
+
+    /// Theoretical option price from Black-Scholes model
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub theo_price: Option<f64>,
+
+    /// Implied volatility (as decimal: 0.25 = 25%)
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub volatility: Option<f64>,
+    
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub delta: Option<f64>,
+
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub gamma: Option<f64>,
+
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub theta: Option<f64>,
+
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub vega: Option<f64>,
+
+    #[serde(deserialize_with = "de_opt_f64_flex")]
+    pub rho: Option<f64>,
+}
+
 // -----------------------------------------------------------------------------
 // Universal Instrument (Equity, Future(?), Crypto, FutureOption)
 // -----------------------------------------------------------------------------
@@ -511,7 +548,7 @@ pub struct StreamSummary
 pub struct Instrument 
 { pub symbol: String,
   #[serde(rename = "instrument-type")]
-  pub instrument_type: String,
+  pub instrument_type: Option<String>,
   #[serde(default)]
   pub description: Option<String>,
   #[serde(default, rename = "root-symbol")]
@@ -558,6 +595,8 @@ pub struct Instrument
   pub option_tick_sizes: Option<Vec<OptionTickSize>>,
   #[serde(default, rename = "spread-tick-sizes")]
   pub spread_tick_sizes: Option<Vec<SpreadTickSize>>,
+  #[serde(default, rename = "tick-sizes")]
+  pub tick_sizes: Option<Vec<TickSize>>,
   #[serde(default, rename = "stops-trading-at")]
   pub stops_trading_at: Option<String>,
   #[serde(default, rename = "expires-at")]
@@ -566,6 +605,7 @@ pub struct Instrument
   pub closing_only_date: Option<String>,
   #[serde(default, rename = "last-trade-date")]
   pub last_trade_date: Option<String>,
+
   #[serde(flatten)]
   pub extra: HashMap<String, Value>,
 }
@@ -577,9 +617,24 @@ pub struct OptionTickSize
   pub threshold: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub value: Option<String>,
+
   #[serde(flatten)]
   pub extra: HashMap<String, Value>,
 }
+
+
+
+// And add this new struct:
+#[derive(Debug, Clone, Deserialize)]
+pub struct FuturesTradingCutoffTime {
+    #[serde(rename = "offset-seconds")]
+    pub offset_seconds: Option<u32>,
+    pub timezone: Option<String>,
+    pub timing: Option<String>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
+}
+
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpreadTickSize 
@@ -648,6 +703,8 @@ pub struct FutureProduct
   pub underlying_identifier: Option<String>,
   #[serde(default)]
   pub roll: Option<Roll>,
+  #[serde(default, rename = "futures-trading-cutoff-times")]
+  pub futures_trading_cutoff_times: Option<Vec<FuturesTradingCutoffTime>>,
   #[serde(flatten)]
   pub extra: HashMap<String, Value>,
 }
@@ -694,23 +751,53 @@ pub struct InstrumentResp
   pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Deliverable 
-{
-  pub amount: String,
-  #[serde(rename = "deliverable-type")]
-  pub deliverable_type: String,
-  pub description: String,
-  pub id: u64,
-  #[serde(rename = "instrument-type")]
-  pub instrument_type: String,
-  pub percent: String,
-  #[serde(rename = "root-symbol")]
-  pub root_symbol: String,
-  pub symbol: String,
-  #[serde(flatten)]
-  pub extra : HashMap<String,Value>
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum DeliverableType {
+    Shares,
+    Cash,
+    Unknown(String), // captures any unexpected value
 }
+impl Default for DeliverableType {
+    fn default() -> Self {
+        DeliverableType::Unknown("".to_string())
+    }
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum InstrumentType {
+    Equity,
+    Unknown(String),
+}
+
+// ----─────────────────────────────────────────────────────────────────────────
+// Updated Deliverable struct
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Deliverable {
+    pub amount: String,
+    #[serde(rename = "deliverable-type", deserialize_with = "deserialize_string_enum")]
+    pub deliverable_type: DeliverableType,
+    pub description: String,
+    pub id: u64,
+    #[serde(rename = "instrument-type", default, deserialize_with = "de_opt_instrument_type")]
+    pub instrument_type: Option<InstrumentType>,
+    pub percent: String,
+    #[serde(rename = "root-symbol")]
+    pub root_symbol: String,
+    #[serde(default)] 
+    pub symbol: Option<String>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
+}
+
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OptionExpiration 
@@ -829,17 +916,25 @@ pub struct OrderRequest
   #[serde(rename = "price-effect", skip_serializing_if = "Option::is_none")]
   pub price_effect: Option<String>,
   pub legs: Vec<OrderLeg>,
+  
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub value: Option<f64>, // for notional value orders
+  #[serde(rename = "value-effect", skip_serializing_if = "Option::is_none")]
+  pub value_effect: Option<String>,
+
   #[serde(flatten)]
-  pub extra : HashMap<String,Value>
+  pub extra : HashMap<String,Value>,
+  
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderLeg 
 { pub symbol: String,
   pub action: String,
-  pub quantity: f64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub quantity: Option<f64>,
   #[serde(rename = "instrument-type")]
-  pub instrument_type: String,
+  pub instrument_type: Option<String>,
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
 }
@@ -848,12 +943,13 @@ pub struct OrderLeg
 pub struct OrderLegResponse 
 { pub symbol: String,
   pub action: String,
-  #[serde(deserialize_with = "de_f64_flex")]
-  pub quantity: f64,
-  #[serde(rename = "remaining-quantity", deserialize_with = "de_f64_flex")]
-  pub remaining_quantity: f64,
+  #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_opt_f64_flex")]
+  pub quantity: Option<f64>,
+  #[serde(default, rename = "remaining-quantity", deserialize_with = "de_opt_f64_flex")]
+  pub remaining_quantity: Option<f64>,
   #[serde(rename = "instrument-type")]
-  pub instrument_type: String,
+  pub instrument_type: Option<String>,
+  #[serde(default)]
   pub fills: Vec<OrderFill>,
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
@@ -864,40 +960,6 @@ pub struct OrderFill
 { 
   #[serde(deserialize_with = "de_f64_flex")]
   pub quantity: f64,
-  #[serde(flatten)]
-  pub extra : HashMap<String,Value>
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OrderResponse 
-{
-  pub id: u64,
-  pub status: String,
-  #[serde(rename = "account-number")]
-  pub account_number: String,
-  #[serde(rename = "time-in-force")]
-  pub time_in_force: String,
-  #[serde(rename = "order-type")]
-  pub order_type: String,
-  #[serde(deserialize_with = "de_string_or_number")]
-  pub size: String,
-  #[serde(rename = "underlying-symbol")]
-  pub underlying_symbol: Option<String>,
-  #[serde(rename = "underlying-instrument-type")]
-  pub underlying_instrument_type: Option<String>,
-  #[serde(deserialize_with = "de_opt_f64_flex")]
-  pub price: Option<f64>,
-  #[serde(rename = "price-effect")]
-  #[serde(default, deserialize_with = "de_opt_string_or_number")]
-  pub price_effect: Option<String>,
-  pub cancellable: bool,
-  pub editable: bool,
-  pub edited: bool,
-  #[serde(rename = "received-at")]
-  pub received_at: Option<String>,
-  #[serde(rename = "updated-at")]
-  pub updated_at: u64,
-  pub legs: Vec<OrderLegResponse>,
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
 }
@@ -915,6 +977,49 @@ pub struct DryRunData
   pub extra : HashMap<String,Value>
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OrderResponse 
+{
+  #[serde(default)]
+  pub id: Option<u64>,
+  pub status: String,
+  #[serde(rename = "account-number")]
+  pub account_number: String,
+  #[serde(rename = "time-in-force")]
+  pub time_in_force: String,
+  #[serde(rename = "order-type")]
+  pub order_type: String,
+  #[serde(default, deserialize_with = "de_opt_string_or_number")]
+  pub size: Option<String>,
+  #[serde(rename = "underlying-symbol")]
+  pub underlying_symbol: Option<String>,
+  #[serde(rename = "underlying-instrument-type")]
+  pub underlying_instrument_type: Option<String>,
+  #[serde(default, deserialize_with = "de_opt_f64_flex")]
+  pub price: Option<f64>,
+  #[serde(rename = "price-effect")]
+  #[serde(default, deserialize_with = "de_opt_string_or_number")]
+  pub price_effect: Option<String>,
+  #[serde(default, deserialize_with = "de_opt_f64_flex")]
+  pub value: Option<f64>,
+  #[serde(rename = "value-effect")]
+  #[serde(default)]
+  pub value_effect: Option<String>,
+  pub cancellable: bool,
+  pub editable: bool,
+  pub edited: bool,
+  #[serde(rename = "received-at")]
+  pub received_at: Option<String>,
+  #[serde(rename = "updated-at")]
+  pub updated_at: u64,
+  #[serde(rename = "global-request-id")]
+  #[serde(default)]
+  pub global_request_id: Option<String>,
+  pub legs: Vec<OrderLegResponse>,
+  #[serde(flatten)]
+  pub extra : HashMap<String,Value>
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuyingPowerEffect 
 { 
@@ -922,8 +1027,41 @@ pub struct BuyingPowerEffect
   pub change_in_buying_power: f64,
   #[serde(rename = "change-in-buying-power-effect")]
   pub change_in_buying_power_effect: String,
+  #[serde(rename = "change-in-margin-requirement", default, deserialize_with = "de_opt_f64_flex")]
+  pub change_in_margin_requirement: Option<f64>,
+  #[serde(rename = "change-in-margin-requirement-effect", default)]
+  pub change_in_margin_requirement_effect: Option<String>,
+  #[serde(rename = "current-buying-power", default, deserialize_with = "de_opt_f64_flex")]
+  pub current_buying_power: Option<f64>,
+  #[serde(rename = "current-buying-power-effect", default)]
+  pub current_buying_power_effect: Option<String>,
+  #[serde(rename = "new-buying-power", default, deserialize_with = "de_opt_f64_flex")]
+  pub new_buying_power: Option<f64>,
+  #[serde(rename = "new-buying-power-effect", default)]
+  pub new_buying_power_effect: Option<String>,
+  #[serde(rename = "isolated-order-margin-requirement", default, deserialize_with = "de_opt_f64_flex")]
+  pub isolated_order_margin_requirement: Option<f64>,
+  #[serde(rename = "isolated-order-margin-requirement-effect", default)]
+  pub isolated_order_margin_requirement_effect: Option<String>,
+  #[serde(default)]
+  pub is_spread: Option<bool>,
+  #[serde(rename = "impact", default, deserialize_with = "de_opt_f64_flex")]
+  pub impact: Option<f64>,
+  #[serde(default)]
+  pub effect: Option<String>,
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeeBreakdownItem 
+{
+  pub name: String,
+  #[serde(deserialize_with = "de_f64_flex")]
+  pub value: f64,
+  pub effect: String,
+  #[serde(flatten)]
+  pub extra: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -933,6 +1071,38 @@ pub struct FeeCalculation
   pub total_fees: f64,
   #[serde(rename = "total-fees-effect")]
   pub total_fees_effect: String,
+  #[serde(rename = "regulatory-fees", default, deserialize_with = "de_opt_f64_flex")]
+  pub regulatory_fees: Option<f64>,
+  #[serde(rename = "regulatory-fees-effect", default)]
+  pub regulatory_fees_effect: Option<String>,
+  #[serde(rename = "regulatory-fees-breakdown", default)]
+  pub regulatory_fees_breakdown: Vec<FeeBreakdownItem>,
+  #[serde(rename = "clearing-fees", default, deserialize_with = "de_opt_f64_flex")]
+  pub clearing_fees: Option<f64>,
+  #[serde(rename = "clearing-fees-effect", default)]
+  pub clearing_fees_effect: Option<String>,
+  #[serde(rename = "clearing-fees-breakdown", default)]
+  pub clearing_fees_breakdown: Vec<FeeBreakdownItem>,
+  #[serde(rename = "commission", default, deserialize_with = "de_opt_f64_flex")]
+  pub commission: Option<f64>,
+  #[serde(rename = "commission-effect", default)]
+  pub commission_effect: Option<String>,
+  #[serde(rename = "commission-breakdown", default)]
+  pub commission_breakdown: Vec<FeeBreakdownItem>,
+  #[serde(rename = "proprietary-index-option-fees", default, deserialize_with = "de_opt_f64_flex")]
+  pub proprietary_index_option_fees: Option<f64>,
+  #[serde(rename = "proprietary-index-option-fees-effect", default)]
+  pub proprietary_index_option_fees_effect: Option<String>,
+  #[serde(rename = "proprietary-fees-breakdown", default)]
+  pub proprietary_fees_breakdown: Vec<FeeBreakdownItem>,
+  #[serde(rename = "rebates", default, deserialize_with = "de_opt_f64_flex")]
+  pub rebates: Option<f64>,
+  #[serde(rename = "rebates-effect", default)]
+  pub rebates_effect: Option<String>,
+  #[serde(rename = "rebates-breakdown", default)]
+  pub rebates_breakdown: Vec<FeeBreakdownItem>,
+  #[serde(rename = "per-quantity", default)]
+  pub per_quantity: Option<bool>,
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
 }

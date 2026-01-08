@@ -29,6 +29,7 @@ pub enum CoreError
   , Unrecoverable(String)
   , ParseFailure(String) 
   , ParseWarning(String)
+  , ValidStartup(u64)
   // ETC
 }
 pub struct CoreConfig 
@@ -194,7 +195,7 @@ impl Thand // NOTE: although these functions are provided for convienence, optim
   pub async fn tell_tastytrade_to_place_order(&self, acct: String, order: OrderRequest) -> Result<OrderResponse> 
   { let (resp_tx, resp_rx) = oneshot::channel();
     if true
-    { log::warn!("TTRS is in debug mode - calls a dry run order whenever we do a order request");
+    { log::warn!("TTRS is in debug mode - calls a dry run order whenever we do a order request: {:#?} ", order);
       match self.tell_tastytrade_to_dry_run_order
       ( acct.clone() // String
       , order.clone() // : OrderRequest
@@ -208,7 +209,6 @@ impl Thand // NOTE: although these functions are provided for convienence, optim
         }
         Err(e) =>
         { log::error!("Gonna panic because ttrs failed a debug requirment to request dryrun: {:#?}", e);
-          panic!("Shit's fucked up");
         }
       }
     }
@@ -390,10 +390,10 @@ pub(crate) async fn ensure_token
     .context("Failed to send token request")?;
   log::trace!("Response status: {}\nResponse headers: {:#?}", resp.status(), resp.headers());
   let body_text = resp.text().await.context("Failed to read response body")?;
-  log::trace!("Response body (raw): {}", body_text);
+  log::trace!("Response body (raw): {:.20} ... []", body_text);
   let resp: Value = serde_json::from_str(&body_text)
     .context("Failed to parse response JSON")?;
-  log::trace!("Response parsed: {:#?}", resp);
+  log::trace!("Response parsed: {:.100}", format!("{:#?}",resp));
   // Check for error
   if let Some(error_code) = resp.get("error_code") 
   { log::error!("OAuth error: error_code = {:?}", error_code);
@@ -476,6 +476,10 @@ fn is_equity_option_streamer(sym: &str) -> bool {
     re.is_match(stripped)
 }
 
+fn is_futures_option_streamer(sym: &str) -> bool {
+    sym.starts_with("./") && sym.ends_with(":XCME") && sym.contains("C") || sym.contains("P")
+}
+
 async fn fetch_streamer_symbol
 (   http: &Client
   , shared_token: Arc<Mutex<Option<AccessToken>>>
@@ -490,13 +494,18 @@ async fn fetch_streamer_symbol
     , shared_token
   ).await?;
 
-    // NEW: Early return for equity option streamer symbols (bypass lookup)
     if is_equity_option_streamer(sym) {
       // where is my request to the equities options?
         log::debug!("Detected equity option streamer symbol '{}'; bypassing instrument lookup (valid dxfeed format)", sym);
         return Ok(sym.to_string());
     }
 
+
+    if is_futures_option_streamer(sym) {
+      // where is my request to the equities options?
+        log::debug!("Detected Futures option streamer symbol '{}'; bypassing instrument lookup (valid dxfeed format)", sym);
+        return Ok(sym.to_string());
+    }
 
   // ---- fetch_streamer_symbol UNIVERSAL ROUTING (subject to change) ----
   let url = if sym.starts_with('/') 
@@ -534,13 +543,21 @@ async fn fetch_streamer_symbol
   }
   let body_text = resp.text().await?;
   log::trace!("Response body: {}", body_text);
-  let resp : InstrumentResp 
-  = serde_json::from_str(&body_text).context
-  ( format!
-    ( "Failed to parse instrument response for {}: {}"
-    , sym, body_text
-    )
-  )?;
+  let resp: InstrumentResp = {
+  let deserializer = &mut serde_json::Deserializer::from_str(&body_text);
+  serde_path_to_error::deserialize(deserializer)
+    .map_err(|e| {
+      let path = e.path().to_string();
+      log::error!(
+        "Failed to deserialize instrument for {} at path '{}': {}",
+        sym, path, e
+      );
+      if let Ok(pretty) = serde_json::to_string_pretty(&serde_json::from_str::<Value>(&body_text).unwrap()) {
+        log::debug!("Full JSON:\n{}", pretty);
+      }
+      anyhow::anyhow!("Parse error at '{}': {}", path, e)
+    })?
+  };
   // Check if streamer_symbol exists, otherwise use symbol
   let streamer_sym = resp.data.streamer_symbol
       .or_else(|| Some(resp.data.symbol.clone()))
@@ -599,17 +616,28 @@ macro_rules! api_req {
         , $token
         , $error_tx
         ).await?;
-      let resp: $resp_type = $http
+      let resp = $http
         .get(&$url)
         .header(header::AUTHORIZATION, format!("Bearer {}", token))
         .header("User-Agent", "ttrs/1.0")
         .send()
-        .await?
-        .json()
         .await?;
-      resp
+      
+      let status = resp.status();
+      if !status.is_success() {
+        let text = resp.text().await.unwrap_or_else(|_| "(empty)".to_string());
+        log::error!("GET {} failed with {}: {}", $url, status, text);
+        return Err(anyhow::anyhow!("Request failed: {} - {}", status, text));
+      }
+      
+      let text = resp.text().await?;
+      serde_json::from_str::<$resp_type>(&text).map_err(|e| {
+        log::error!("Failed to parse JSON from successful GET {}: {}\nBody was: {}", $url, e, text);
+        anyhow::anyhow!("JSON parse error: {}", e)
+      })?
     }
   };
+  
   (POST, $url:expr, $body:expr, $resp_type:ty, $http:expr, $token:expr, $base_url:expr, $oauth:expr, $error_tx:expr) => {
     {
       let token = ensure_token_resilient
@@ -628,13 +656,22 @@ macro_rules! api_req {
         .body(body)
         .send()
         .await?;
-      if !resp.status().is_success()
-      { return Err(anyhow::anyhow!("Request failed: {}", resp.status()));
+      
+      let status = resp.status();
+      if !status.is_success() {
+        let text = resp.text().await.unwrap_or_else(|_| "(empty)".to_string());
+        log::error!("POST {} failed with {}: {}", $url, status, text);
+        return Err(anyhow::anyhow!("Request failed: {} - {}", status, text));
       }
-      let or: $resp_type = resp.json().await?;
-      or
+      
+      let text = resp.text().await?;
+      serde_json::from_str::<$resp_type>(&text).map_err(|e| {
+        log::error!("Failed to parse JSON from successful POST {}: {}\nBody was: {}", $url, e, text);
+        anyhow::anyhow!("JSON parse error: {}", e)
+      })?
     }
   };
+  
   (DELETE, $url:expr, $resp_type:ty, $http:expr, $token:expr, $base_url:expr, $oauth:expr, $error_tx:expr) => {
     {
       let token = ensure_token_resilient
@@ -645,18 +682,27 @@ macro_rules! api_req {
         , $error_tx
         ).await?;
       let resp = $http
-        .request(Method::DELETE, &$url)
+        .request(reqwest::Method::DELETE, &$url)
         .header(header::AUTHORIZATION, format!("Bearer {}", token))
         .header("User-Agent", "ttrs/1.0")
         .send()
         .await?;
-      if !resp.status().is_success()
-      { return Err(anyhow::anyhow!("Request failed: {}", resp.status()));
+      
+      let status = resp.status();
+      if !status.is_success() {
+        let text = resp.text().await.unwrap_or_else(|_| "(empty)".to_string());
+        log::error!("DELETE {} failed with {}: {}", $url, status, text);
+        return Err(anyhow::anyhow!("Request failed: {} - {}", status, text));
       }
-      let or: $resp_type = resp.json().await?;
-      or
+      
+      let text = resp.text().await?;
+      serde_json::from_str::<$resp_type>(&text).map_err(|e| {
+        log::error!("Failed to parse JSON from successful DELETE {}: {}\nBody was: {}", $url, e, text);
+        anyhow::anyhow!("JSON parse error: {}", e)
+      })?
     }
   };
+  
   (PUT, $url:expr, $body:expr, $resp_type:ty, $http:expr, $token:expr, $base_url:expr, $oauth:expr, $error_tx:expr) => {
     {
       let token = ensure_token_resilient
@@ -668,18 +714,26 @@ macro_rules! api_req {
         ).await?;
       let body = serde_json::to_string(&$body)?;
       let resp = $http
-        .request(Method::PUT, &$url)
+        .request(reqwest::Method::PUT, &$url)
         .header(header::AUTHORIZATION, format!("Bearer {}", token))
         .header(header::CONTENT_TYPE, "application/json")
         .header("User-Agent", "ttrs/1.0")
         .body(body)
         .send()
         .await?;
-      if !resp.status().is_success()
-      { return Err(anyhow::anyhow!("Request failed: {}", resp.status()));
+      
+      let status = resp.status();
+      if !status.is_success() {
+        let text = resp.text().await.unwrap_or_else(|_| "(empty)".to_string());
+        log::error!("PUT {} failed with {}: {}", $url, status, text);
+        return Err(anyhow::anyhow!("Request failed: {} - {}", status, text));
       }
-      let or: $resp_type = resp.json().await?;
-      or
+      
+      let text = resp.text().await?;
+      serde_json::from_str::<$resp_type>(&text).map_err(|e| {
+        log::error!("Failed to parse JSON from successful PUT {}: {}\nBody was: {}", $url, e, text);
+        anyhow::anyhow!("JSON parse error: {}", e)
+      })?
     }
   };
 }
@@ -710,6 +764,7 @@ pub async fn fn_run_core
   );
   let tx_to_ticker_loop = itx;
   let mut account_handles: Vec<JoinHandle<()>> = Vec::new();
+  let _ = config.error_tx.send(CoreError::ValidStartup(0));
   // ENTERING MAIN LOOP:  
   loop 
   { let http = http0.clone();
@@ -978,33 +1033,347 @@ pub async fn fn_run_core
       }
 
       // ===== COMPLEX HANDLERS (CUSTOM LOGIC) =====
-      Some((underlying, resp_tx)) = tfoot.get_option_chain.recv() => 
+      // ===== COMPLEX HANDLERS (CUSTOM LOGIC) =====
+      Some((underlying, resp_tx)) = tfoot.get_option_chain.recv() =>
       { let http = http.clone();
         let shared_token = shared_token.clone();
         let conn = conn_info.clone();
         let error_tx = config.error_tx.clone();
         spawn_api_task_safe
-        ( async move 
-          { let chain_url = if underlying.starts_with('/') 
-            { let root = underlying.trim_start_matches('/');
-              format!("{}/futures-option-chains/{}/nested", conn.base_url, root)
-            } 
-            else 
-            { format!("{}/option-chains/{}/nested", conn.base_url, underlying)
+        ( async move
+          { use chrono::{Datelike, Duration, Utc, Weekday,DateTime,TimeZone};
+
+            let dbgspt = "[TTRS_BOT_GET_OPTION_CHAIN]";
+
+            // Current date as specified
+            let today = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(); // unwrap is safe for valid dates
+
+            // Helper to parse "YYYY-MM-DD" into chrono::Date<Utc>
+            let parse_date = |s: &str| -> Result<DateTime<Utc>> {
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .map(|nd| nd.and_hms_opt(0, 0, 0).unwrap())
+                    .map(|naive| Utc.from_utc_datetime(&naive))
+                    .map_err(|e| anyhow::anyhow!("Invalid date format: {}", e))
             };
-            let resp = api_req!(GET, chain_url, OptionChainResponse, http, shared_token, conn.base_url, conn.oauth, error_tx);
-            if !resp.extra.is_empty()
-            { log::warn!
-              ( "TTRS detected un-processed extra data in get_option_chain;\n  {}\n  {}"
-              , format!("resp.context = {:#?}", resp.context)
-              , format!("resp.extra = {:#?}", resp.extra)
+
+            if underlying.starts_with('/') {
+              log::trace!("{} Futures option chain request for {}", dbgspt, underlying);
+
+              // Extract product root code (e.g. "ES" from "/ESH6")
+              let mut root = underlying.trim_start_matches('/').to_string();
+
+              // Remove trailing year digits
+              while root.chars().last().map_or(false, |c| c.is_ascii_digit()) {
+                root.pop();
+              }
+              // Remove trailing month letter
+              if root.chars().last().map_or(false, |c| c.is_alphabetic()) {
+                root.pop();
+              }
+
+              log::debug!("{} Using detailed flat endpoint for root: {}", dbgspt, root);
+
+              // Use the detailed (non-nested) endpoint
+              let base_url = format!("{}/futures-option-chains/{}", conn.base_url, root);
+
+              // Build list of desired expiration dates
+              let mut desired_expirations = std::collections::HashSet::new();
+
+              let mut date = today + Duration::days(1);
+
+              // Next 2 months: daily business days (Mon-Fri)
+              let two_months = today + Duration::days(60);
+              while date < two_months {
+                if matches!(date.weekday(), Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri) {
+                  desired_expirations.insert(date);
+                }
+                date += Duration::days(1);
+              }
+
+              // Next 2 months after that: Mon, Wed, Fri
+              let four_months = today + Duration::days(120);
+              while date < four_months {
+                if matches!(date.weekday(), Weekday::Mon | Weekday::Wed | Weekday::Fri) {
+                  desired_expirations.insert(date);
+                }
+                date += Duration::days(1);
+              }
+
+              // Next 2 months after that: Fridays only
+              let six_months = today + Duration::days(180);
+              while date < six_months {
+                if date.weekday() == Weekday::Fri {
+                  desired_expirations.insert(date);
+                }
+                date += Duration::days(1);
+              }
+
+              // Monthlies (3rd Friday) for next 6 months beyond 6 months
+              let mut monthly_cursor = today + Duration::days(180);
+              let twelve_months_from_now = today + Duration::days(365 + 180);
+              while monthly_cursor < twelve_months_from_now {
+                let year = monthly_cursor.year();
+                let month = monthly_cursor.month();
+
+                let mut first_day = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap();
+
+                let today = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(); // unwrap is safe for valid dates
+
+                // Find first Friday
+                while first_day.weekday() != Weekday::Fri {
+                  first_day += Duration::days(1);
+                }
+                let third_friday = first_day + Duration::days(14); // 1st + 14 days = 3rd Friday
+
+                if third_friday >= today {
+                  desired_expirations.insert(third_friday);
+                }
+
+                // Next month
+                monthly_cursor = if month == 12 {
+                  Utc.with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0).unwrap()
+                } 
+                  else {
+                  Utc.with_ymd_and_hms(year, month+1, 1, 0, 0, 0).unwrap()
+                };
+              }
+
+              log::debug!("{} Generated {} desired expiration dates", dbgspt, desired_expirations.len());
+
+              // Pagination handling
+              let mut all_items = Vec::new();
+              let mut offset = 0;
+              let per_page = 500; // Max allowed; adjust if needed
+
+              loop {
+                let url = format!("{}?per-page={}&page-offset={}", base_url, per_page, offset);
+
+                log::debug!("{} Fetching page offset={} from {}", dbgspt, offset, url);
+
+                let token = ensure_token_resilient(&http, &conn.base_url, &conn.oauth, shared_token.clone(), error_tx.clone()).await?;
+
+                let resp = http.get(&url)
+                  .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                  .header("User-Agent", "ttrs/1.0")
+                  .send()
+                  .await
+                  .context("Failed to fetch futures option chain page")?;
+
+                if !resp.status().is_success() {
+                  return Err(anyhow::anyhow!("Futures option chain request failed: {}", resp.status()));
+                }
+
+                let body_text = resp.text().await.context("Failed to read response body")?;
+                let json: serde_json::Value = serde_json::from_str(&body_text)
+                  .context("Failed to parse JSON")?;
+
+                let items = match json["data"]["items"].as_array() {
+                  Some(a) => a,
+                  None => return Err(anyhow::anyhow!("No items in response")),
+                };
+
+                if items.is_empty() {
+                  break; // No more pages
+                }
+
+                let mut page_filtered = Vec::new();
+
+                for item in items {
+                  if let Some(exp_str) = item["expiration-date"].as_str() {
+                    if let Ok(exp_date) = parse_date(exp_str) {
+                      if desired_expirations.contains(&exp_date) {
+                        // You may want to clone or map to your internal Option type here
+                        page_filtered.push(item.clone());
+                      }
+                    }
+                  }
+                }
+                let pfl = page_filtered.len();
+                all_items.extend(page_filtered);
+                log::debug!("{} Added {} filtered items from this page (total so far: {})", dbgspt, pfl, all_items.len());
+
+                // Check pagination
+                let total = json["pagination"]["total-items"].as_u64().unwrap_or(0);
+                if (offset + per_page) as u64 >= total {
+                  break;
+                }
+
+                offset += per_page;
+              }
+
+              log::info!("{} Successfully fetched and filtered {} futures options for {}", dbgspt, all_items.len(), underlying);
+
+              // // Construct final OptionChainData (adjust field names to match your struct)
+
+              use chrono::{DateTime, Utc};
+              use std::collections::{HashMap, BTreeMap};
+
+              // After collecting all_items: Vec<Value>
+
+              log::info!("{} Successfully fetched and filtered {} futures options for {}", dbgspt, all_items.len(), underlying);
+
+              // Group by expiration date first
+              let mut expirations_map: HashMap<String, (DateTime<Utc>, BTreeMap<String, (Value, Value)>)> = HashMap::new();
+
+              for item in all_items {
+                  let exp_date_str = match item["expiration-date"].as_str() {
+                      Some(s) => s,
+                      None => continue,
+                  };
+                  let strike = match item["strike-price"].as_str() {
+                      Some(s) => s.to_string(),
+                      None => continue,
+                  };
+
+                  let is_call = match item["option-type"].as_str() {
+                      Some("C") => true,
+                      Some("P") => false,
+                      _ => { log::warn!("TTRS - UNKNOWN OPTION TYPE for item {:#?}", item); continue; },
+                  };
+
+                  use serde_json::Value;
+                  let exp_entry = expirations_map
+                      .entry(exp_date_str.to_string())
+                      .or_insert_with(|| {
+                          let dt = parse_date(exp_date_str).expect("valid expiration date");
+                          (dt, BTreeMap::new())
+                      });
+
+                  let strike_entry = exp_entry.1 // the BTreeMap<String, (Value, Value)>
+                      .entry(strike)
+                      .or_insert((Value::Null, Value::Null));
+
+                  if is_call {
+                      strike_entry.0 = item.clone(); // replace call
+                  } else {
+                      strike_entry.1 = item.clone(); // replace put
+                  }
+              }
+
+              // Now build the nested structure
+              let mut expirations: Vec<OptionExpiration> = Vec::new();
+
+              for (exp_date_str, (exp_dt, strikes_map)) in expirations_map {
+                  let days_to_exp = (exp_dt - today).num_days() as u32;
+
+                  let mut strikes: Vec<Strike> = Vec::new();
+
+                  for (strike_price, (call_val, put_val)) in strikes_map {
+                      let call_symbol = call_val["symbol"].as_str().unwrap_or("");
+                      let call_streamer = call_val["streamer-symbol"].as_str().unwrap_or("");
+                      let put_symbol = put_val["symbol"].as_str().unwrap_or("");
+                      let put_streamer = put_val["streamer-symbol"].as_str().unwrap_or("");
+
+                      // Skip if missing one side (though you filtered to paired expirations)
+                      if call_symbol.is_empty() || put_symbol.is_empty() {
+                          continue;
+                      }
+
+                      strikes.push(Strike {
+                          strike_price: strike_price,
+                          call: call_symbol.to_string(),
+                          call_streamer_symbol: call_streamer.to_string(),
+                          put: put_symbol.to_string(),
+                          put_streamer_symbol: put_streamer.to_string(),
+                          extra: HashMap::new(),
+                      });
+                  }
+
+                  // Determine expiration type (simplified)
+                  let expiration_type = if exp_dt.weekday() == Weekday::Fri {
+                      "Weekly".to_string()
+                  } else {
+                      "Monthly".to_string()
+                  };
+
+                  // Settlement type — most ES are physical delivery via future
+                  let settlement_type = "Future".to_string();
+
+                  expirations.push(OptionExpiration {
+                      days_to_expiration: days_to_exp,
+                      expiration_date: exp_date_str,
+                      expiration_type,
+                      settlement_type,
+                      strikes,
+                      extra: HashMap::new(),
+                  });
+              }
+
+              // Sort expirations by date
+              expirations.sort_by_key(|e| e.expiration_date.clone());
+
+              // Build the root
+              let root = OptionChainRoot {
+                  root_symbol: "/ES".to_string(),
+                  underlying_symbol: underlying.to_string(),
+                  shares_per_contract: 50, // E-mini S&P 500 multiplier
+                  option_chain_type: "standard".to_string(),
+                  tick_sizes: vec![], // You can populate from future-product if needed
+                  deliverables: vec![],
+                  expirations,
+                  extra: HashMap::new(),
+              };
+
+              // Final response
+              let chain_data = OptionChainData {
+                  items: vec![root],
+                  extra: HashMap::new(),
+              };
+
+              Ok(chain_data)
+            } 
+            else
+            {
+              // === EQUITY PATH (unchanged from original) ===
+              let chain_url = format!("{}/option-chains/{}/nested", conn.base_url, underlying);
+              log::debug!("{} Equity option chain URL: {}", dbgspt, chain_url);
+
+              let token = ensure_token_resilient(&http, &conn.base_url, &conn.oauth, shared_token, error_tx.clone()).await?;
+
+              let reqwest_resp = http
+                .get(&chain_url)
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header("User-Agent", "ttrs/1.0")
+                .send()
+                .await
+                .context("Failed to send equity option chain request")?;
+
+              if !reqwest_resp.status().is_success() {
+                return Err(anyhow::anyhow!("Equity option chain request failed: {}", reqwest_resp.status()));
+              }
+
+              let body_text = reqwest_resp.text().await.context("Failed to read raw body")?;
+              log::trace!("{} Equity chain raw response: {:.200} ... [{}]", dbgspt, body_text, body_text.len());
+
+              let mut deserializer = serde_json::Deserializer::from_str(&body_text);
+              let resp: OptionChainResponse = serde_path_to_error::deserialize(&mut deserializer)
+                .map_err(|e| {
+                  log::error!(
+                    "{} Equity chain deserialization failed at path '{}': {}\nRaw body:\n{}",
+                    dbgspt, e.path(), e.inner(), body_text
+                  );
+                  anyhow::anyhow!("Deserialization failed at '{}': {}", e.path(), e.inner())
+                })?;
+
+              if !resp.extra.is_empty() {
+                log::warn!(
+                  "{} Detected extra unprocessed data in equity chain response",
+                  dbgspt
+                );
+              }
+
+              log::debug!(
+                "{} Equity option chain fetched successfully: {} items",
+                dbgspt, resp.data.items.len()
               );
+
+              Ok(resp.data)
             }
-            Ok(resp.data)
           }
           , resp_tx, error_tx_clone2, "get_option_chain"
         );
       }
+
 
       Some((symbol, resp_tx)) = tfoot.get_instrument.recv() => 
       { let http = http.clone();
@@ -1089,15 +1458,17 @@ pub(crate) async fn ticker_loop_resilient
   , shared_token: Arc<Mutex<Option<AccessToken>>>
   , shared_quote: Arc<Mutex<Option<QuoteToken>>>
   , error_tx: mpsc::UnboundedSender<CoreError>
-  ,
 ) 
-{ loop 
-  { match ticker_loop
+{ let mut tlc = 0;
+  loop 
+  { tlc = tlc + 1;
+    match ticker_loop
     ( &mut rx
     , &conn
     , shared_token.clone()
     , shared_quote.clone()
     , error_tx.clone()
+    , tlc
     ).await
     { Ok(_) => break,
       Err(e) => 
@@ -1117,6 +1488,7 @@ async fn ticker_loop
 , shared_token: Arc<Mutex<Option<AccessToken>>>
 , shared_quote: Arc<Mutex<Option<QuoteToken>>>
 , error_tx: mpsc::UnboundedSender<CoreError>
+, lcounter: u64
 ) -> Result<()>
 { log::debug!
   ( "TTRS TICKER_LOOP (TTRS_TL) STARTED | base_url={}"
@@ -1208,6 +1580,9 @@ async fn ticker_loop
       return Err(anyhow::anyhow!(msg));
     }
   };
+
+  let _ = error_tx.send(CoreError::ValidStartup(lcounter));
+
   let (mut ws_sink, mut ws_src) = ws_stream.split();
   log::trace!("// ------------------------------------------------------------");
   log::debug!("TTRS_TL 3. DXLink handshake");
@@ -1260,20 +1635,43 @@ async fn ticker_loop
         { TickerLoopCmd::AddRoute(user_sym, streamer_sym, user_tx) =>
           { log::trace!("TTRS_TL: AddRoute user={user_sym} streamer={streamer_sym}");
             routes.insert(streamer_sym.clone(), (user_sym.clone(), user_tx));
-            let sub = format!
-            ( r#"{{
-                  "type":"FEED_SUBSCRIPTION",
-                  "channel":3,
-                  "reset":false,
-                  "add":[
-                      {{"type":"Quote", "symbol":"{}"}},
-                      {{"type":"Trade", "symbol":"{}"}},
-                      {{"type":"Profile", "symbol":"{}"}},
-                      {{"type":"Summary", "symbol":"{}"}}
-                  ]
-              }}"#
-              , streamer_sym, streamer_sym, streamer_sym, streamer_sym
-            );
+            // TODO: alloow this to be set by the user:
+            let sub = if streamer_sym.starts_with('.')
+            { format!
+              ( r#"{{
+                    "type":"FEED_SUBSCRIPTION",
+                    "channel":3,
+                    "reset":false,
+                    "add":[
+                        {{"type":"Quote", "symbol":"{}"}},
+                        {{"type":"Trade", "symbol":"{}"}},
+                        {{"type":"Profile", "symbol":"{}"}},
+                        {{"type":"Summary", "symbol":"{}"}},
+                        {{"type":"Greeks", "symbol":"{}"}}
+                    ]
+                }}"#
+                , streamer_sym, streamer_sym, streamer_sym
+                , streamer_sym, streamer_sym, 
+              )
+            } 
+            else
+            { format!
+              ( r#"{{
+                    "type":"FEED_SUBSCRIPTION",
+                    "channel":3,
+                    "reset":false,
+                    "add":[
+                        {{"type":"Quote", "symbol":"{}"}},
+                        {{"type":"Trade", "symbol":"{}"}},
+                        {{"type":"Profile", "symbol":"{}"}},
+                        {{"type":"Summary", "symbol":"{}"}}
+                    ]
+                }}"#
+                , streamer_sym, streamer_sym, streamer_sym
+                , streamer_sym,
+              )
+            };
+
             if let Err(e) = ws_sink.send(Message::Text(sub)).await
             { let msg = format!("ticker_loop: subscription failed for {streamer_sym}: {e}");
               log::debug!("TTRS_TL EXIT FAIL - {msg}");
@@ -1298,7 +1696,7 @@ async fn ticker_loop
                   { Some(a) => a,
                     None =>
                     { let msg = format!("TTRS_TL: FEED_DATA without data array: {v:?}");
-                      log::warn!("{msg}");
+                      log::trace!("{msg}");
                       let _ = error_tx.send(CoreError::ParseWarning(msg));
                       continue;
                     }
@@ -1319,116 +1717,179 @@ async fn ticker_loop
                       }
                     };
                     let inner_val = &data_arr[i + 1];
-                    match ev_type
-                    { "Quote" =>
-                      { if let Some(inner_arr) = inner_val.as_array()
+
+                    let to_opt_f64 = |v: &Value| -> Option<f64>
+                    { match v
+                      { Value::Null => None,
+                        Value::Number(n) => n.as_f64(),
+                        Value::String(s) =>
+                        { let s = s.trim();
+                          if s.is_empty() || s == "NaN" { None } else { s.parse::<f64>().ok() }
+                        },
+                        _ => None,
+                      }
+                    };
+                    match ev_type 
+                    {
+                      "Quote" => 
+                      {
+                          if let Some(inner_arr) = inner_val.as_array() {
+                              let mut j = 0;
+                              while j < inner_arr.len() {
+                                  // Each Quote event: ["Quote", symbol, bid_price, ask_price, bid_size, ask_size]
+                                  if j + 5 >= inner_arr.len() {
+                                      break; // incomplete
+                                  }
+                                  if inner_arr[j].as_str() != Some("Quote") {
+                                      j += 1;
+                                      continue;
+                                  }
+                                  let symbol = inner_arr[j + 1].as_str().unwrap_or("").to_string();
+                                  
+                                  let bid = to_opt_f64(&inner_arr[j + 2]);
+                                  let ask = to_opt_f64(&inner_arr[j + 3]);
+                                  let bid_size = to_opt_f64(&inner_arr[j + 4]);
+                                  let ask_size = to_opt_f64(&inner_arr[j + 5]);
+
+                                  let quote = StreamQuote {
+                                      event_type: "Quote".into(),
+                                      symbol: symbol.clone(),
+                                      bid_price: bid,
+                                      ask_price: ask,
+                                      bid_size,
+                                      ask_size,
+                                  };
+
+                                  if let Some((user_sym, tx)) = routes.get(&symbol) {
+                                      let mut q = quote;
+                                      q.symbol = user_sym.clone();
+                                      let _ = tx.send(StreamData::Quote(q)).await;
+                                  }
+
+                                  j += 6;
+                              }
+                          }
+                      }
+                      ,
+                      "Profile" | "Summary" | "Trade" => 
+                      {
+                          // Handle batched non-Quote events
+                          if let Some(inner_arr) = inner_val.as_array() {
+                              let mut j = 0;
+                              while j < inner_arr.len() {
+                                  if j + 1 >= inner_arr.len() {
+                                      break;
+                                  }
+                                  let event_type = match inner_arr[j].as_str() {
+                                      Some(s) => s,
+                                      None => { j += 1; continue; }
+                                  };
+
+                                  // Skip if not the expected type (in case mixed batch)
+                                  if event_type != ev_type {
+                                      j += 1;
+                                      continue;
+                                  }
+
+                                  let event_data = &inner_arr[j + 1..]; // remaining fields for this event
+                                  let raw_val = Value::Array(inner_arr[j..].to_vec());
+
+                                  match ev_type {
+                                      "Trade" => {
+                                          if let Ok(raw) = serde_json::from_value::<RawTrade>(raw_val.clone()) {
+                                              let mut trade: StreamTrade = raw.into();
+                                              if let Some((user_sym, tx)) = routes.get(&trade.symbol) {
+                                                  trade.symbol = user_sym.clone();
+                                                  let _ = tx.send(StreamData::Trade(trade)).await;
+                                              }
+                                          } else {
+                                              log::error!("Trade parse FAILURE | raw={:?}", raw_val);
+                                          }
+                                      }
+                                      "Summary" => {
+                                          if let Ok(raw) = serde_json::from_value::<RawSummary>(raw_val.clone()) {
+                                              let mut summary: StreamSummary = raw.into();
+                                              if let Some((user_sym, tx)) = routes.get(&summary.symbol) {
+                                                  summary.symbol = user_sym.clone();
+                                                  let _ = tx.send(StreamData::Summary(summary)).await;
+                                              }
+                                          } else {
+                                              log::error!("Summary parse FAILURE | raw={:?}", raw_val);
+                                          }
+                                      }
+                                      "Profile" => {
+                                          if let Ok(raw) = serde_json::from_value::<RawProfile>(raw_val.clone()) {
+                                              let mut profile: StreamProfile = raw.into();
+                                              if let Some((user_sym, tx)) = routes.get(&profile.symbol) {
+                                                  profile.symbol = user_sym.clone();
+                                                  let _ = tx.send(StreamData::Profile(profile)).await;
+                                              }
+                                          } else {
+                                              log::error!("Profile parse FAILURE | raw={:?}", raw_val);
+                                          }
+                                      }
+                                      _ => {}
+                                  }
+
+                                  // Advance by number of fields used (1 for type + fields)
+                                  // We don't know exact length, so just move past this event
+                                  j += event_data.len() + 1;
+                              }
+                          }
+                      }
+                      ,
+                     "Greeks" => 
+                      { if let Some(inner_arr) = inner_val.as_array() 
                         { let mut j = 0;
-                          while j + 5 < inner_arr.len()
-                          { if inner_arr[j].as_str() != Some("Quote")
+                          while j + 13 < inner_arr.len() 
+                          { // Need at least 14 elements
+                            if inner_arr[j].as_str() != Some("Greeks") 
                             { j += 1;
                               continue;
-                            }
-                            let symbol = inner_arr[j + 1].as_str().unwrap_or("").to_string();
-                            let to_opt_f64 = |v: &Value| -> Option<f64>
-                            { match v
-                              { Value::Null => None,
-                                Value::Number(n) => n.as_f64(),
-                                Value::String(s) =>
-                                { let s = s.trim();
-                                  if s.is_empty() || s == "NaN" { None } else { s.parse::<f64>().ok() }
-                                },
-                                _ => None,
-                              }
+                            } 
+                            let symbol = inner_arr[j + 1]
+                              .as_str()
+                              .unwrap_or("")
+                              .to_string();
+
+                            // Correct mapping based on real tastytrade/dxfeed output
+                            let event_time   = to_opt_f64(&inner_arr[j + 2]);  // often 0
+                            // skip flags, index
+                            let calc_time    = to_opt_f64(&inner_arr[j + 5]);  // the big timestamp (e.g. 1735948219000)
+                            let _sequence    = to_opt_f64(&inner_arr[j + 6]);
+
+                            let theo_price   = to_opt_f64(&inner_arr[j + 7]);
+                            let volatility   = to_opt_f64(&inner_arr[j + 8]);
+                            let delta        = to_opt_f64(&inner_arr[j + 9]);
+                            let gamma        = to_opt_f64(&inner_arr[j + 10]);
+                            let theta        = to_opt_f64(&inner_arr[j + 11]);
+                            let vega         = to_opt_f64(&inner_arr[j + 12]);
+                            let rho          = to_opt_f64(&inner_arr[j + 13]);
+
+                            let greeks = StreamGreeks {
+                                symbol: symbol.clone(),
+                                event_time,
+                                calc_time,
+                                theo_price,
+                                volatility,
+                                delta,
+                                gamma,
+                                theta,
+                                vega,
+                                rho,
                             };
-                            let bid       = to_opt_f64(&inner_arr[j + 2]);
-                            let ask       = to_opt_f64(&inner_arr[j + 3]);
-                            let bid_size  = to_opt_f64(&inner_arr[j + 4]);
-                            let ask_size  = to_opt_f64(&inner_arr[j + 5]);
-                            let quote = StreamQuote
-                            { event_type: "Quote".into(),
-                              symbol: symbol.clone(),
-                              bid_price: bid,
-                              ask_price: ask,
-                              bid_size,
-                              ask_size,
-                            };
-                            if let Some((user_sym, tx)) = routes.get(&symbol)
-                            { let mut q = quote;
-                              q.symbol = user_sym.clone();
-                              let _ = tx.send(StreamData::Quote(q)).await;
-                              log::trace!("TTRS_TL: Forwarded Quote for {user_sym}");
+
+                            if let Some((user_sym, tx)) = routes.get(&symbol) 
+                            { let mut g = greeks;
+                              g.symbol = user_sym.clone();
+                              let _ = tx.send(StreamData::Greeks(g)).await;
                             }
-                            j += 6;
-                          }
-                        }
-                        else
-                        { let msg = format!("TTRS_TL: Quote inner value not array: {inner_val:?}");
-                          log::warn!("{msg}");
-                          let _ = error_tx.send(CoreError::ParseWarning(msg));
-                        }
-                      }
-                      "Trade" =>
-                      { match serde_json::from_value::<RawTrade>(inner_val.clone())
-                        { Ok(raw) =>
-                          { let mut trade: StreamTrade = raw.into();
-                            log::trace!("TTRS_TL: Parsed Trade for {}", trade.symbol);
-                            if let Some((user_sym, tx)) = routes.get(&trade.symbol)
-                            { trade.symbol = user_sym.clone();
-                              let _ = tx.send(StreamData::Trade(trade)).await;
-                              log::trace!("TTRS_TL: Forwarded Trade for {user_sym}");
-                            }
-                            else
-                            { let msg = format!
-                              ( "TTRS_TL: Trade parse EMPTY ROUTE:raw={inner_val:?}"
-                              );
-                              log::warn!("{msg}");
-                            }
-                          }
-                          Err(e) =>
-                          { let msg = format!
-                            ( "TTRS_TL: Trade parse FAILURE: {e} | raw={inner_val:?} "
-                            );
-                            log::error!("{msg}");
-                            let _ = error_tx.send(CoreError::ParseFailure(msg));
+
+                            j += 14;  // Skip past all 14 fields
                           }
                         }
                       }
-                      "Summary" =>
-                      { match serde_json::from_value::<RawSummary>(inner_val.clone())
-                        { Ok(raw) =>
-                          { let mut summary: StreamSummary = raw.into();
-                            log::trace!("TTRS_TL: Parsed Summary for {}", summary.symbol);
-                            if let Some((user_sym, tx)) = routes.get(&summary.symbol)
-                            { summary.symbol = user_sym.clone();
-                              let _ = tx.send(StreamData::Summary(summary)).await;
-                              log::trace!("TTRS_TL: Forwarded Summary for {user_sym}");
-                            }
-                          }
-                          Err(e) =>
-                          { let msg = format!("TTRS_TL: Summary parse FAILURE: {e} | raw={inner_val:?}");
-                            log::error!("{msg}");
-                            let _ = error_tx.send(CoreError::ParseFailure(msg));
-                          }
-                        }
-                      }
-                      "Profile" =>
-                      { match serde_json::from_value::<RawProfile>(inner_val.clone())
-                        { Ok(raw) =>
-                          { let mut profile: StreamProfile = raw.into();
-                            log::trace!("TTRS_TL: Parsed Profile for {}", profile.symbol);
-                            if let Some((user_sym, tx)) = routes.get(&profile.symbol)
-                            { profile.symbol = user_sym.clone();
-                              let _ = tx.send(StreamData::Profile(profile)).await;
-                              log::trace!("TTRS_TL: Forwarded Profile for {user_sym}");
-                            }
-                          }
-                          Err(e) =>
-                          { let msg = format!("TTRS_TL: Profile parse FAILURE: {e} | raw={inner_val:?}");
-                            log::error!("{msg}");
-                            let _ = error_tx.send(CoreError::ParseFailure(msg));
-                          }
-                        }
-                      }
+                      ,
                       other =>
                       { let msg = format!("TTRS_TL: unhandled FEED_DATA event type: {other}");
                         log::warn!("{msg}");
@@ -1438,8 +1899,27 @@ async fn ticker_loop
                     i += 2;
                   }
                 }
+                Ok(v) if v["type"].as_str() == Some("KEEPALIVE") =>
+                { let _ = error_tx.send
+                  ( CoreError::ParseWarning
+                   ( format!
+                     ( "KEEPALIVE:{:#?}", v
+                     )
+                   )
+                  );
+                }
                 Ok(v) =>
-                { let msg = format!("TTRS_TL: ignored message type: {}", v["type"]);
+                { let msg = format!
+                  ( "TTRS_TL: ignored message type: {} {}"
+                  , v["type"]
+                  , { if v["type"] == "ERROR"
+                      { format!("=> {:#?}",v)
+                      } 
+                      else
+                      { format!("...")
+                      }
+                    }
+                  );
                   log::warn!("{msg}");
                   let _ = error_tx.send(CoreError::ParseWarning(msg));
                 }

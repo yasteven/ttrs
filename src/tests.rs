@@ -374,14 +374,15 @@ async fn test_all_api_endpoints() {
     // Test 7: Get Order by ID
     log::trace!("\n[7/15] Testing get_order_by_id...");
     if let Some(first_order) = live_orders.first() {
+        let id = first_order.id.unwrap();
         let start = Instant::now();
         let order_detail = thand
-            .tell_tastytrade_to_get_order_by_id(acct_num.clone(), first_order.id)
+            .tell_tastytrade_to_get_order_by_id(acct_num.clone(), id )
             .await;
         let elapsed = start.elapsed().as_millis();
         timings.push(format!("get_order_by_id: {} ms", elapsed));
         match order_detail {
-            Ok(detail) => log::trace!(" ✓ Order {} status: {} (took {} ms)", detail.id, detail.status, elapsed),
+            Ok(detail) => log::trace!(" ✓ Order {} status: {} (took {} ms)", detail.id.unwrap(), detail.status, elapsed),
             Err(e) => log::warn!("Failed to get order detail: {} (took {} ms)", e, elapsed),
         }
     } else {
@@ -480,7 +481,7 @@ async fn test_all_api_endpoints() {
     let elapsed = start.elapsed().as_millis();
     timings.push(format!("get_instrument(AAPL): {} ms", elapsed));
     match instrument {
-        Ok(i) => log::trace!(" ✓ Instrument: {} ({}) (took {} ms)", i.symbol, i.instrument_type, elapsed),
+        Ok(i) => log::trace!(" ✓ Instrument: {} ({:#?}) (took {} ms)", i.symbol, i.instrument_type, elapsed),
         Err(e) => log::warn!("Failed to get instrument: {} (took {} ms)", e, elapsed),
     }
 
@@ -494,10 +495,12 @@ async fn test_all_api_endpoints() {
         legs: vec![OrderLeg {
             symbol: "AAPL".to_string(),
             action: "Buy to Open".to_string(),
-            quantity: 1.0,
-            instrument_type: "Equity".to_string(),
+            quantity: Some(1.0),
+            instrument_type: Some("Equity".to_string()),
             extra: HashMap::new(),
         }],
+        value: None,
+        value_effect: None,
         extra: HashMap::new(),
     };
     let start = Instant::now();
@@ -883,6 +886,11 @@ async fn test_ticker_streaming() {
                             "Profile",
                             format!("status={}", p.status),
                         ),
+                        StreamData::Greeks(p) => (
+                            "Greeks",
+                            format!("status={:#?}", p),
+                        ),
+
                     };
 
                     log::trace!("✓ {} [{}] {}", stream.symbol, type_name, log_line);
@@ -893,7 +901,7 @@ async fn test_ticker_streaming() {
                     *type_map.entry(type_name.to_string()).or_insert(0) += 1;
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {}
-                Err(e) => log::error!("Channel error for {}: {:?}", stream.symbol, e),
+                Err(e) => log::error!("Channel error for {:#?}: {:?}", stream.symbol, e),
             }
         }
 
@@ -1350,3 +1358,174 @@ async fn test_token_refresh_retry() {
     let _ = core_handle.await;
 }
 
+
+
+
+
+
+
+
+// =============================================================================
+// Dry Run Order Test - Test limit order preview on BTC/USD
+// WITH REQUEST BODY LOGGING
+// =============================================================================
+
+#[tokio::test]
+async fn test_dry_run_order_cryptocurrency() {
+    let _start = Instant::now();
+    setuplog();
+    
+    let creds = load_creds();
+    let conn_info = ConnectionInfo {
+        base_url: "https://api.tastyworks.com".to_string(),
+        oauth: (
+            creds["client_id"].as_str().unwrap_or("").to_string(),
+            creds["client_secret"].as_str().unwrap_or("").to_string(),
+            creds["refresh_token"].as_str().unwrap_or("").to_string(),
+        ),
+    };
+    let acct_num = creds["account"].as_str().unwrap_or("").to_string();
+    if acct_num.is_empty() {
+        panic!("account number required in test-creds.json for this test");
+    }
+    
+    log::trace!("\n=== Testing Dry Run Order (Cryptocurrency - BTC/USD) ===");
+    log::trace!("Account: {}", acct_num);
+    
+    let (thand, tfoot) = make_core_api(10);
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<String>(1);
+    let config = CoreConfig { error_tx, shutdown_rx };
+    let core_handle = tokio::spawn(fn_run_core(tfoot, conn_info, config));
+    
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // Create test order: Buy 1e-5 BTC at $91,000 (limit order)
+    
+    // Create test order: Buy ~$91 worth of BTC (notional market order)
+    let mut leg_extra: HashMap<String, Value> = HashMap::new();
+    leg_extra.insert("source".to_string(), Value::String("test".to_string()));
+   
+    let order_legs = vec![
+        OrderLeg {
+            symbol: "BTC/USD".to_string(),
+            action: "Buy to Open".to_string(),  // Use "Buy" or "Sell" for crypto, not BUY_TO_OPEN
+            quantity: None,  // Omit quantity for notional orders (or set to None if your struct allows)
+            instrument_type: Some("Cryptocurrency".to_string()),
+            extra: leg_extra,
+        }
+    ];
+   
+    let mut order_extra: HashMap<String, Value> = HashMap::new();
+    order_extra.insert("test_mode".to_string(), Value::String("true".to_string()));
+   
+    let dry_run_order = OrderRequest {
+        time_in_force: "IOC".to_string(),           // Immediate or Cancel required for crypto
+        order_type: "Notional Market".to_string(),  // Special order type for crypto
+        price: None,                                // Not used for notional market
+        price_effect: None, //Some("Debit".to_string()),    // Required: "Debit" for buy, "Credit" for sell
+        // Assuming your OrderRequest struct has a `value` field (f64 or Option<f64>)
+        // If not, add it! It's required for notional crypto orders.
+        value: Some(91.0),                        // Negative = buy/debit; use a reasonable notional amount
+        value_effect: Some(format!("Debit")),                        // Negative = buy/debit; use a reasonable notional amount
+        legs: order_legs,
+        extra: order_extra,
+    };
+
+
+    log::trace!("Order object being sent:");
+    log::trace!("{:#?}", dry_run_order);
+    
+    // Manually serialize to see what's being sent
+    match serde_json::to_string_pretty(&dry_run_order) {
+        Ok(json_str) => {
+            log::info!("\n================== REQUEST BODY ==================");
+            log::info!("{}", json_str);
+            log::info!("===================================================\n");
+        }
+        Err(e) => {
+            log::error!("Failed to serialize order: {}", e);
+        }
+    }
+    
+    log::trace!("Submitting dry run order:");
+    log::trace!("  Symbol: BTC/USD");
+    log::trace!("  Action: BUY_TO_OPEN");
+    log::trace!("  Quantity: 0.00001");
+    log::trace!("  Price: $91,000.00");
+    log::trace!("  Time in Force: DAY");
+    
+    // Call dry run
+    let dry_run_start = Instant::now();
+    match thand
+        .tell_tastytrade_to_dry_run_order(acct_num.clone(), dry_run_order.clone())
+        .await
+    {
+        Ok(dry_run_response) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::trace!("\n✓ Dry Run PASSED ({}ms)", elapsed);
+            log::trace!("================== DRY RUN RESULT ==================");
+            log::trace!("{:#?}", dry_run_response);
+            log::trace!("===================================================\n");
+            
+            // Validate response structure
+            let bp_change = dry_run_response.buying_power_effect.change_in_buying_power;
+            assert!(!bp_change.is_nan(),
+                "Buying power effect should be a valid number");
+            
+            log::trace!("Buying Power Effect: ${:.2}",
+                dry_run_response.buying_power_effect.change_in_buying_power);
+            
+            log::trace!("Effect Type: {}",
+                dry_run_response.buying_power_effect.change_in_buying_power_effect);
+            
+            // Additional validations
+            if !bp_change.is_nan() {
+                if bp_change < 0.0 {
+                    log::trace!("Order will use ${:.2} of buying power", bp_change.abs());
+                } else {
+                    log::trace!("Order will free up ${:.2} of buying power", bp_change);
+                }
+            }
+            
+            // Log fees
+            log::trace!("Total Fees: ${:.2}", 
+                dry_run_response.fee_calculation.total_fees);
+            log::trace!("Fees Effect: {}", 
+                dry_run_response.fee_calculation.total_fees_effect);
+            
+            // Log any warnings
+            if !dry_run_response.warnings.is_empty() {
+                log::warn!("Dry run warnings:");
+                for warning in &dry_run_response.warnings {
+                    log::warn!("  - {}", warning);
+                }
+            }
+        }
+        Err(e) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::error!("\n✗ Dry Run FAILED ({}ms)", elapsed);
+            log::error!("Error: {}", e);
+            log::error!("This could indicate:");
+            log::error!("  - Insufficient buying power for the order");
+            log::error!("  - Invalid symbol or quantity");
+            log::error!("  - Account restrictions preventing this trade");
+            log::error!("  - Market data unavailable for BTC/USD");
+            log::error!("  - Wrong field names or structure in OrderRequest");
+            panic!("Dry run failed: {}", e);
+        }
+    }
+    
+    // Check for errors during execution
+    if let Ok(err) = error_rx.try_recv() {
+        let msg = format!("{:#?}",err);
+        if !msg.contains("ValidStartup(0)")
+        { log::error!("Unexpected error during test: {:?}", msg);
+        }
+    }
+    
+    log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
+    let _ = shutdown_tx.send("test shutdown".to_string()).await;
+    drop(thand);
+    let _ = core_handle.await;
+}

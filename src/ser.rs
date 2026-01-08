@@ -1,8 +1,52 @@
 //ttrs/src/ser.rs - seralization functions
-// src/ser.rs
-use serde::{de::{Deserializer, Visitor}, Deserialize};
+use serde::{de::{self, Deserializer, Visitor}, Deserialize};
 use serde_json::Value;
 use std::fmt;
+use std::marker::PhantomData;
+
+// Custom deserialize for string enums that fall back to "Unknown" on unseen values
+pub(crate) fn deserialize_string_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: From<String> + Default + std::str::FromStr,
+    <T as std::str::FromStr>::Err: fmt::Display,
+{
+    struct StringEnumVisitor<T>(PhantomData<T>);
+
+    impl<'de, T> Visitor<'de> for StringEnumVisitor<T>
+    where
+        T: From<String> + Default + std::str::FromStr,
+        <T as std::str::FromStr>::Err: fmt::Display,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("string")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value.parse::<Self::Value>().map_err(serde::de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_str(StringEnumVisitor(PhantomData))
+}
+
+
+pub(crate) fn de_opt_instrument_type<'de, D>(deserializer: D) -> Result<Option<InstrumentType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    match opt {
+        Some(s) => Ok(Some(s.parse::<InstrumentType>().map_err(serde::de::Error::custom)?)),
+        None => Ok(None),
+    }
+}
+
 
 /// Flex f64: accepts number, int, or string → f64
 pub(crate) fn de_f64_flex<'de, D>(deserializer: D) 
@@ -495,3 +539,58 @@ pub(crate) struct LiveOrdersData
   #[serde(default)]
   pub context: Option<String>,
 }
+
+
+impl From<String> for DeliverableType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "Shares" => DeliverableType::Shares,
+            "Cash" => DeliverableType::Cash,
+            _ => DeliverableType::Unknown(s),
+        }
+    }
+}
+
+impl std::str::FromStr for DeliverableType {
+    type Err = std::io::Error; // not actually used, but required
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "Shares" => DeliverableType::Shares,
+            "Cash" => DeliverableType::Cash,
+            _ => DeliverableType::Unknown(s.to_string()),
+        })
+    }
+}
+
+impl fmt::Display for DeliverableType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeliverableType::Shares => write!(f, "Shares"),
+            DeliverableType::Cash => write!(f, "Cash"),
+            DeliverableType::Unknown(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+
+impl From<String> for InstrumentType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "Equity" => InstrumentType::Equity,
+            _ => InstrumentType::Unknown(s),
+        }
+    }
+}
+
+impl std::str::FromStr for InstrumentType {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "Equity" => InstrumentType::Equity,
+            _ => InstrumentType::Unknown(s.to_string()),
+        })
+    }
+}
+
