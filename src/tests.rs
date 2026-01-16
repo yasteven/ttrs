@@ -1358,13 +1358,6 @@ async fn test_token_refresh_retry() {
     let _ = core_handle.await;
 }
 
-
-
-
-
-
-
-
 // =============================================================================
 // Dry Run Order Test - Test limit order preview on BTC/USD
 // WITH REQUEST BODY LOGGING
@@ -1524,6 +1517,547 @@ async fn test_dry_run_order_cryptocurrency() {
         }
     }
     
+    log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
+    let _ = shutdown_tx.send("test shutdown".to_string()).await;
+    drop(thand);
+    let _ = core_handle.await;
+}
+
+#[tokio::test]
+async fn test_dry_run_order_stock_limit_buy() {
+    let _start = Instant::now();
+    setuplog();
+
+    // === CONFIG - EASY TO MODIFY ===
+    let symbol = "SEV";
+    let quantity: f64 = 1.0;
+    let limit_price: f64 = 5.0;  // Limit price per share
+    // ===============================
+
+    let creds = load_creds();
+    let conn_info = ConnectionInfo {
+        base_url: "https://api.tastyworks.com".to_string(),
+        oauth: (
+            creds["client_id"].as_str().unwrap_or("").to_string(),
+            creds["client_secret"].as_str().unwrap_or("").to_string(),
+            creds["refresh_token"].as_str().unwrap_or("").to_string(),
+        ),
+    };
+    let acct_num = creds["account"].as_str().unwrap_or("").to_string();
+    if acct_num.is_empty() {
+        panic!("account number required in test-creds.json for this test");
+    }
+
+    log::trace!("\n=== Testing Dry Run Order (Stock Limit Buy) ===");
+    log::trace!("Symbol: {}", symbol);
+    log::trace!("Quantity: {}", quantity);
+    log::trace!("Limit Price: ${}", limit_price);
+    log::trace!("Account: {}", acct_num);
+
+    let (thand, tfoot) = make_core_api(10);
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<String>(1);
+    let config = CoreConfig { error_tx, shutdown_rx };
+    let core_handle = tokio::spawn(fn_run_core(tfoot, conn_info, config));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut order_extra: HashMap<String, Value> = HashMap::new();
+    order_extra.insert("test_mode".to_string(), Value::String("true".to_string()));
+
+    let dry_run_order = OrderRequest {
+        time_in_force: "Day".to_string(),
+        order_type: "Limit".to_string(),
+        price: Some(limit_price),
+        price_effect: Some("Debit".to_string()),
+        legs: vec![
+            OrderLeg {
+                symbol: symbol.to_string(),
+                action: "Buy to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity".to_string()),
+                extra: HashMap::new(),
+            },
+        ],
+        value: None,
+        value_effect: None,
+        extra: order_extra,
+    };
+
+    log::trace!("Order object being sent:");
+    log::trace!("{:#?}", dry_run_order);
+
+    match serde_json::to_string_pretty(&dry_run_order) {
+        Ok(json_str) => {
+            log::info!("\n================== REQUEST BODY ==================");
+            log::info!("{}", json_str);
+            log::info!("===================================================\n");
+        }
+        Err(e) => log::error!("Failed to serialize order: {}", e),
+    }
+
+    let dry_run_start = Instant::now();
+    match thand
+        .tell_tastytrade_to_dry_run_order(acct_num.clone(), dry_run_order.clone())
+        .await
+    {
+        Ok(dry_run_response) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::trace!("\n✓ Dry Run PASSED ({}ms)", elapsed);
+            log::trace!("================== DRY RUN RESULT ==================");
+            log::trace!("{:#?}", dry_run_response);
+            log::trace!("===================================================\n");
+
+            let bp_change = dry_run_response.buying_power_effect.change_in_buying_power;
+            assert!(!bp_change.is_nan(), "Buying power effect should be a valid number");
+
+            log::trace!("Buying Power Effect: ${:.2}", bp_change);
+            if bp_change < 0.0 {
+                log::trace!("Order will use ${:.2} of buying power", bp_change.abs());
+            } else {
+                log::trace!("Order will free up ${:.2} of buying power", bp_change);
+            }
+
+            log::trace!("Total Fees: ${:.2}", dry_run_response.fee_calculation.total_fees);
+
+            if !dry_run_response.warnings.is_empty() {
+                log::warn!("Dry run warnings:");
+                for warning in &dry_run_response.warnings {
+                    log::warn!(" - {}", warning);
+                }
+            }
+        }
+        Err(e) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::error!("\n✗ Dry Run FAILED ({}ms)", elapsed);
+            log::error!("Error: {}", e);
+            panic!("Dry run failed: {}", e);
+        }
+    }
+
+    if let Ok(err) = error_rx.try_recv() {
+        let msg = format!("{:#?}", err);
+        if !msg.contains("ValidStartup(0)") {
+            log::error!("Unexpected error during test: {:?}", msg);
+        }
+    }
+
+    log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
+    let _ = shutdown_tx.send("test shutdown".to_string()).await;
+    drop(thand);
+    let _ = core_handle.await;
+}
+
+#[tokio::test]
+#[ignore] // This test costs $50
+async fn test_real_run_order_stock_limit_buy() {
+    let _start = Instant::now();
+    setuplog();
+
+    // === CONFIG - EASY TO MODIFY ===
+    let symbol = "SEV";
+    let quantity: f64 = 10.0;
+    let limit_price: f64 = 5.0;  // Limit price per share
+    // ===============================
+
+    let creds = load_creds();
+    let conn_info = ConnectionInfo {
+        base_url: "https://api.tastyworks.com".to_string(),
+        oauth: (
+            creds["client_id"].as_str().unwrap_or("").to_string(),
+            creds["client_secret"].as_str().unwrap_or("").to_string(),
+            creds["refresh_token"].as_str().unwrap_or("").to_string(),
+        ),
+    };
+    let acct_num = creds["account"].as_str().unwrap_or("").to_string();
+    if acct_num.is_empty() {
+        panic!("account number required in test-creds.json for this test");
+    }
+
+    log::trace!("\n=== Testing Dry Run Order (Stock Limit Buy) ===");
+    log::trace!("Symbol: {}", symbol);
+    log::trace!("Quantity: {}", quantity);
+    log::trace!("Limit Price: ${}", limit_price);
+    log::trace!("Account: {}", acct_num);
+
+    let (thand, tfoot) = make_core_api(10);
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<String>(1);
+    let config = CoreConfig { error_tx, shutdown_rx };
+    let core_handle = tokio::spawn(fn_run_core(tfoot, conn_info, config));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut order_extra: HashMap<String, Value> = HashMap::new();
+    order_extra.insert("test_mode".to_string(), Value::String("true".to_string()));
+
+    let dry_run_order = OrderRequest {
+        time_in_force: "Day".to_string(),
+        order_type: "Limit".to_string(),
+        price: Some(limit_price),
+        price_effect: Some("Debit".to_string()),
+        legs: vec![
+            OrderLeg {
+                symbol: symbol.to_string(),
+                action: "Buy to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity".to_string()),
+                extra: HashMap::new(),
+            },
+        ],
+        value: None,
+        value_effect: None,
+        extra: order_extra,
+    };
+
+    log::trace!("Order object being sent:");
+    log::trace!("{:#?}", dry_run_order);
+
+    match serde_json::to_string_pretty(&dry_run_order) {
+        Ok(json_str) => {
+            log::info!("\n================== REQUEST BODY ==================");
+            log::info!("{}", json_str);
+            log::info!("===================================================\n");
+        }
+        Err(e) => log::error!("Failed to serialize order: {}", e),
+    }
+
+    let dry_run_start = Instant::now();
+    match thand
+        .tell_tastytrade_to_place_order(acct_num.clone(), dry_run_order.clone())
+        .await
+    {
+        Ok(ores) =>  // : OrderResponse
+        { 
+          let elapsed = dry_run_start.elapsed().as_millis();
+          log::trace!("\n✓ Dry Run PASSED ({}ms)", elapsed);
+          log::trace!("================== DRY RUN RESULT ==================");
+          log::trace!("{:#?}", ores);
+          log::trace!("===================================================\n");
+
+          // let bp_change = dry_run_response.buying_power_effect.change_in_buying_power;
+          // assert!(!bp_change.is_nan(), "Buying power effect should be a valid number");
+          // log::trace!("Buying Power Effect: ${:.2}", bp_change);
+          // if bp_change < 0.0 {
+          //     log::trace!("Order will use ${:.2} of buying power", bp_change.abs());
+          // } else {
+          //     log::trace!("Order will free up ${:.2} of buying power", bp_change);
+          // }
+
+          // log::trace!("Total Fees: ${:.2}", ores.fee_calculation.total_fees);
+
+          // if !ores.warnings.is_empty() {
+          //   log::warn!("Dry run warnings:");
+          //   for warning in &ores.warnings {
+          //       log::warn!(" - {}", warning);
+          //   }
+          // }
+        }
+        Err(e) => 
+        {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::error!("\n✗ Dry Run FAILED ({}ms)", elapsed);
+            log::error!("Error: {}", e);
+            panic!("Dry run failed: {}", e);
+        }
+    }
+
+    if let Ok(err) = error_rx.try_recv() {
+        let msg = format!("{:#?}", err);
+        if !msg.contains("ValidStartup(0)") {
+            log::error!("Unexpected error during test: {:?}", msg);
+        }
+    }
+
+    log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
+    let _ = shutdown_tx.send("test shutdown".to_string()).await;
+    drop(thand);
+    let _ = core_handle.await;
+}
+
+#[tokio::test]
+async fn test_dry_run_order_option_credit_spread_open() {
+    let _start = Instant::now();
+    setuplog();
+
+    // === CONFIG - EASY TO MODIFY ===
+    //let buy_leg_symbol = ".SEV260116P3"; // Ticker Name
+    let buy_leg_symbol = "SPY   260114P00687000"; // Option Name // 3.16
+    //let sell_leg_symbol = ".SEV260116P4";
+    let sell_leg_symbol = "SPY   260114P00688000"; // 3.46
+
+
+    //ticker_name: ".SPY260114P687",
+    //option_name: "SPY   260114P00687000",
+
+    let quantity: f64 = 1.0;
+    let buy_price: f64 = 3.16;   // Price you're willing to pay for the long leg
+    let sell_price: f64 = 3.46;  // Price you're willing to sell the short leg for
+    let net_credit_limit: f64 = sell_price - buy_price;  // 1.90 - 0.60 = 1.30
+    // ===============================
+
+    let creds = load_creds();
+    let conn_info = ConnectionInfo {
+        base_url: "https://api.tastyworks.com".to_string(),
+        oauth: (
+            creds["client_id"].as_str().unwrap_or("").to_string(),
+            creds["client_secret"].as_str().unwrap_or("").to_string(),
+            creds["refresh_token"].as_str().unwrap_or("").to_string(),
+        ),
+    };
+    let acct_num = creds["account"].as_str().unwrap_or("").to_string();
+    if acct_num.is_empty() {
+        panic!("account number required in test-creds.json for this test");
+    }
+
+    log::trace!("\n=== Testing Dry Run Order (Option Credit Spread Open) ===");
+    log::trace!("Buy:  {} x {} @ ${}", quantity, buy_leg_symbol, buy_price);
+    log::trace!("Sell: {} x {} @ ${}", quantity, sell_leg_symbol, sell_price);
+    log::trace!("Net Credit Limit: ${}", net_credit_limit);
+    log::trace!("Account: {}", acct_num);
+
+    let (thand, tfoot) = make_core_api(10);
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<String>(1);
+    let config = CoreConfig { error_tx, shutdown_rx };
+    let core_handle = tokio::spawn(fn_run_core(tfoot, conn_info, config));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut order_extra: HashMap<String, Value> = HashMap::new();
+    order_extra.insert("test_mode".to_string(), Value::String("true".to_string()));
+
+    let dry_run_order = OrderRequest {
+        time_in_force: "Day".to_string(),
+        order_type: "Limit".to_string(),
+        price: Some(net_credit_limit),
+        price_effect: Some("Credit".to_string()),
+        legs: vec![
+            OrderLeg {
+                symbol: buy_leg_symbol.to_string(),
+                action: "Buy to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity Option".to_string()),
+                extra: HashMap::new(),
+            },
+            OrderLeg {
+                symbol: sell_leg_symbol.to_string(),
+                action: "Sell to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity Option".to_string()),
+                extra: HashMap::new(),
+            },
+        ],
+        value: None,
+        value_effect: None,
+        extra: order_extra,
+    };
+
+    // (Same logging, submission, validation, and shutdown as the stock test above)
+
+    log::trace!("Order object being sent:");
+    log::trace!("{:#?}", dry_run_order);
+
+    match serde_json::to_string_pretty(&dry_run_order) {
+        Ok(json_str) => {
+            log::info!("\n================== REQUEST BODY ==================");
+            log::info!("{}", json_str);
+            log::info!("===================================================\n");
+        }
+        Err(e) => log::error!("Failed to serialize order: {}", e),
+    }
+
+    let dry_run_start = Instant::now();
+    match thand
+        .tell_tastytrade_to_dry_run_order(acct_num.clone(), dry_run_order.clone())
+        .await
+    {
+        Ok(dry_run_response) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::trace!("\n✓ Dry Run PASSED ({}ms)", elapsed);
+            log::trace!("================== DRY RUN RESULT ==================");
+            log::trace!("{:#?}", dry_run_response);
+            log::trace!("===================================================\n");
+
+            let bp_change = dry_run_response.buying_power_effect.change_in_buying_power;
+            assert!(!bp_change.is_nan(), "Buying power effect should be a valid number");
+
+            log::trace!("Buying Power Effect: ${:.2}", bp_change);
+            if bp_change < 0.0 {
+                log::trace!("Order will use ${:.2} of buying power", bp_change.abs());
+            } else {
+                log::trace!("Order will free up ${:.2} of buying power", bp_change);
+            }
+
+            log::trace!("Total Fees: ${:.2}", dry_run_response.fee_calculation.total_fees);
+
+            if !dry_run_response.warnings.is_empty() {
+                log::warn!("Dry run warnings:");
+                for warning in &dry_run_response.warnings {
+                    log::warn!(" - {}", warning);
+                }
+            }
+        }
+        Err(e) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::error!("\n✗ Dry Run FAILED ({}ms)", elapsed);
+            log::error!("Error: {}", e);
+            panic!("Dry run failed: {}", e);
+        }
+    }
+
+    if let Ok(err) = error_rx.try_recv() {
+        let msg = format!("{:#?}", err);
+        if !msg.contains("ValidStartup(0)") {
+            log::error!("Unexpected error during test: {:?}", msg);
+        }
+    }
+
+    log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
+    let _ = shutdown_tx.send("test shutdown".to_string()).await;
+    drop(thand);
+    let _ = core_handle.await;
+}
+
+#[tokio::test]
+async fn test_dry_run_order_option_debit_spread_open() {
+    let _start = Instant::now();
+    setuplog();
+
+    // === CONFIG - EASY TO MODIFY ===
+    //let buy_leg_symbol = ".SEV260116P3"; // Ticker Name
+    let sell_leg_symbol  = "SPY   260114P00687000"; // Option Name // 3.16
+    //let sell_leg_symbol = ".SEV260116P4";
+    let  buy_leg_symbol = "SPY   260114P00688000"; // 3.46
+
+
+    //ticker_name: ".SPY260114P687",
+    //option_name: "SPY   260114P00687000",
+
+    let quantity: f64 = 1.0;
+    let buy_price: f64 = 3.46;   // Price you're willing to pay for the long leg
+    let sell_price: f64 = 3.16;  // Price you're willing to sell the short leg for
+    let net_debit_limit: f64 = (buy_price - sell_price) ;  // 0.3 always positive for http
+
+    // ===============================
+
+    let creds = load_creds();
+    let conn_info = ConnectionInfo {
+        base_url: "https://api.tastyworks.com".to_string(),
+        oauth: (
+            creds["client_id"].as_str().unwrap_or("").to_string(),
+            creds["client_secret"].as_str().unwrap_or("").to_string(),
+            creds["refresh_token"].as_str().unwrap_or("").to_string(),
+        ),
+    };
+    let acct_num = creds["account"].as_str().unwrap_or("").to_string();
+    if acct_num.is_empty() {
+        panic!("account number required in test-creds.json for this test");
+    }
+
+    log::trace!("\n=== Testing Dry Run Order (Option Credit Spread Open) ===");
+    log::trace!("Buy:  {} x {} @ ${}", quantity, buy_leg_symbol, buy_price);
+    log::trace!("Sell: {} x {} @ ${}", quantity, sell_leg_symbol, sell_price);
+    log::trace!("Net Debit Limit: ${}", net_debit_limit);
+    log::trace!("Account: {}", acct_num);
+
+    let (thand, tfoot) = make_core_api(10);
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<String>(1);
+    let config = CoreConfig { error_tx, shutdown_rx };
+    let core_handle = tokio::spawn(fn_run_core(tfoot, conn_info, config));
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut order_extra: HashMap<String, Value> = HashMap::new();
+    order_extra.insert("test_mode".to_string(), Value::String("true".to_string()));
+
+    let dry_run_order = OrderRequest {
+        time_in_force: "Day".to_string(),
+        order_type: "Limit".to_string(),
+        price: Some(net_debit_limit),
+        price_effect: Some("Debit".to_string()),
+        legs: vec![
+            OrderLeg {
+                symbol: buy_leg_symbol.to_string(),
+                action: "Buy to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity Option".to_string()),
+                extra: HashMap::new(),
+            },
+            OrderLeg {
+                symbol: sell_leg_symbol.to_string(),
+                action: "Sell to Open".to_string(),
+                quantity: Some(quantity),
+                instrument_type: Some("Equity Option".to_string()),
+                extra: HashMap::new(),
+            },
+        ],
+        value: None,
+        value_effect: None,
+        extra: order_extra,
+    };
+
+    // (Same logging, submission, validation, and shutdown as the stock test above)
+
+    log::trace!("Order object being sent:");
+    log::trace!("{:#?}", dry_run_order);
+
+    match serde_json::to_string_pretty(&dry_run_order) {
+        Ok(json_str) => {
+            log::info!("\n================== REQUEST BODY ==================");
+            log::info!("{}", json_str);
+            log::info!("===================================================\n");
+        }
+        Err(e) => log::error!("Failed to serialize order: {}", e),
+    }
+
+    let dry_run_start = Instant::now();
+    match thand
+        .tell_tastytrade_to_dry_run_order(acct_num.clone(), dry_run_order.clone())
+        .await
+    {
+        Ok(dry_run_response) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::trace!("\n✓ Dry Run PASSED ({}ms)", elapsed);
+            log::trace!("================== DRY RUN RESULT ==================");
+            log::trace!("{:#?}", dry_run_response);
+            log::trace!("===================================================\n");
+
+            let bp_change = dry_run_response.buying_power_effect.change_in_buying_power;
+            assert!(!bp_change.is_nan(), "Buying power effect should be a valid number");
+
+            log::trace!("Buying Power Effect: ${:.2}", bp_change);
+            if bp_change < 0.0 {
+                log::trace!("Order will use ${:.2} of buying power", bp_change.abs());
+            } else {
+                log::trace!("Order will free up ${:.2} of buying power", bp_change);
+            }
+
+            log::trace!("Total Fees: ${:.2}", dry_run_response.fee_calculation.total_fees);
+
+            if !dry_run_response.warnings.is_empty() {
+                log::warn!("Dry run warnings:");
+                for warning in &dry_run_response.warnings {
+                    log::warn!(" - {}", warning);
+                }
+            }
+        }
+        Err(e) => {
+            let elapsed = dry_run_start.elapsed().as_millis();
+            log::error!("\n✗ Dry Run FAILED ({}ms)", elapsed);
+            log::error!("Error: {}", e);
+            panic!("Dry run failed: {}", e);
+        }
+    }
+
+    if let Ok(err) = error_rx.try_recv() {
+        let msg = format!("{:#?}", err);
+        if !msg.contains("ValidStartup(0)") {
+            log::error!("Unexpected error during test: {:?}", msg);
+        }
+    }
+
     log::trace!("Test completed in {}ms\n", _start.elapsed().as_millis());
     let _ = shutdown_tx.send("test shutdown".to_string()).await;
     drop(thand);

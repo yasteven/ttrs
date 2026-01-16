@@ -13,7 +13,7 @@ use tokio::time::interval;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
-use reqwest::{Client, header, Method};
+use reqwest::{Client, header};
 use serde_json::Value;
 use rand::Rng;
 use futures_util::{StreamExt, SinkExt};
@@ -194,7 +194,7 @@ impl Thand // NOTE: although these functions are provided for convienence, optim
   }
   pub async fn tell_tastytrade_to_place_order(&self, acct: String, order: OrderRequest) -> Result<OrderResponse> 
   { let (resp_tx, resp_rx) = oneshot::channel();
-    if true
+    if true // false
     { log::warn!("TTRS is in debug mode - calls a dry run order whenever we do a order request: {:#?} ", order);
       match self.tell_tastytrade_to_dry_run_order
       ( acct.clone() // String
@@ -954,20 +954,14 @@ pub async fn fn_run_core
       // ===== SIMPLE POST HANDLERS =====
       Some((acct, order, resp_tx)) = tfoot.place_order.recv() => 
       { let url = format!("{}/accounts/{}/orders", conn.base_url, acct);
-        if true
-        { log::warn!("ttrs core library is in SAFE DEBUG mode, we will not do any order requests ");
-          panic!("If you reached this point, good job, time to debug");
-        }
-        else
-        { spawn_api_task_safe
-          ( async move 
-            { let resp = api_req!(POST, url, order, OrderSubmitResp, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
-              if !resp.data.order.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
-              Ok(resp.data.order)
-            }
-            , resp_tx, error_tx_clone2, "place_order"
-          );
-        }
+        spawn_api_task_safe
+        ( async move 
+          { let resp = api_req!(POST, url, order, OrderSubmitResp, http, shared_token, conn.base_url, conn.oauth, error_tx_clone1);
+            if !resp.data.order.extra.is_empty() { log::warn!("TTRS - Tastytrade gave us EXTRA DATA IN RESPONSE! {:#?}", resp);}
+            Ok(resp.data.order)
+          }
+          , resp_tx, error_tx_clone2, "place_order"
+        );
       }
 
       Some((acct, order, resp_tx)) = tfoot.dry_run.recv() => 

@@ -1,16 +1,75 @@
-# TTRS: Tastytrade Rust SDK
+# TTRS: Tastytrade Rust SDK (Unofficial)
 
-A comprehensive, high-performance Rust client library for the Tastytrade API. Built from scratch with async-first design, robust connection management, and targeting complete API coverage.
+WARRANTY: there is no guaruntee this code works or follows the api's 
+as described by tastytrade. tastytrade is a trademark, this is not a
+offfical product; it is a prototype library written by just one code
+wrangler, a singluar individual. There is no guarnetee this code can
+be operated via the described methods, since the documentation comes
+mostly from AI generated overiviews which may be wrong or inneficent
+but I can provide feedback to people who are interested in the code.
+Therefore, usage of this code pressposes zero liability by any party
+that experiences a financial loss from usage of the code conained: -
 
-**Current Status**: 0.8.1 (Integration Testing) → 0.9.0 (Stabilization) → 1.0.0 (Production Ready)
+TTRS is .
+
+The following is ai generated:
+
+  nor this is a 
+
+A comprehensive, high-performance Rust client library for the 
+Tastytrade API. Built from scratch with async-first design, robust 
+connection management, and targeting complete API coverage.
+
+**Current Status**
+: 0.8.1 (Integration Testing) 
+→ 0.9.0 (Stabilization) 
+→ 1.0.0 (Production Ready)
 
 Change Status
 
-0.8.1: fixed a bug that prevented proper ticker subscriptions when using options streamer symbols
+0.8.1: fixed a bug that prevented proper ticker subscriptions when
+ using options streamer symbols
 
 0.8.2: TODO: will check rate settings for streaming
 
+TODO, profile update parsing needs to be fixed:
+
+05:18:50.523 [TRACE] usta::dr_ttai - [TTAI-TICK] Received profile
+ update, skipping ticker distribution StreamProfile {
+    symbol: "VTEB",
+    event_id: 0.0,
+    description: "Vanguard Tax-Exempt Bond ETF",
+    market_status: "UNDEFINED",
+    status: "ACTIVE",
+    halt_status: None,
+    open_time: 1766964808000.0,
+    close_time: 1768174752000.0,
+    avg_volume: None,
+    avg_volume_30d: None,
+    high_52w: 50.68,
+    low_52w: 47.02,
+    div_amount: Some(
+        0.256678451923827,
+    ),
+    div_yield: None,
+    div_freq: Some(
+        12.0,
+    ),
+    div_ex_date: Some(
+        0.1417,
+    ),
+    beta: 20440.0,
+    earnings_per_share: Some(
+        846150626.0,
+    ),
+    market_cap: None,
+    extra: {},
+}
+
+
 ---
+
+
 
 ## What is TTRS?
 
