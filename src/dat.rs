@@ -175,7 +175,7 @@ pub struct Position
   #[serde(rename = "instrument-type")]
   pub instrument_type: Option<String>,  
   #[serde(rename = "streamer-symbol")]
-  pub streamer_symbol: String,
+  pub streamer_symbol: Option<String>,
   pub symbol: String,
   #[serde(rename = "underlying-symbol")]
   pub underlying_symbol: String,
