@@ -61,6 +61,11 @@ pub use dat::
   , BuyingPowerEffect
   , FeeCalculation
   , MarginRequirements
+  // ==== MISC. COMPONENETS
+  , TickSize
+  , OptionTickSize
+  , SpreadTickSize
+
 };
 
 // Keep for the tests.rs  

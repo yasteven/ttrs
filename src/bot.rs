@@ -30,6 +30,7 @@ pub enum CoreError
   , ParseFailure(String) 
   , ParseWarning(String)
   , ValidStartup(u64)
+  , ReplyWarning(String)
   // ETC
 }
 pub struct CoreConfig 
@@ -599,6 +600,30 @@ fn spawn_api_task_safe<T, Fut>
         }
         Err(e) => 
         { let msg = format!("Task '{}' failed: {}", desc, e);
+          let _ = error_tx.send(CoreError::ReplyWarning(msg.clone()));
+          let _ = resp_tx.send(Err(anyhow::anyhow!(msg)));
+        }
+      }
+    }
+  );
+}
+
+fn spawn_api_task_deadly<T, Fut>
+( fut: Fut
+, resp_tx: oneshot::Sender<Result<T>>
+, error_tx: mpsc::UnboundedSender<CoreError>
+, description: &str
+) where T: Send + 'static
+, Fut: Future<Output = Result<T>> + Send + 'static,
+{ let desc = description.to_string();
+  tokio::spawn
+  ( async move 
+    { match fut.await 
+      { Ok(result) => 
+        { let _ = resp_tx.send(Ok(result));
+        }
+        Err(e) => 
+        { let msg = format!("Task '{}' failed: {}", desc, e);
           let _ = error_tx.send(CoreError::Unrecoverable(msg.clone()));
           let _ = resp_tx.send(Err(anyhow::anyhow!(msg)));
         }
@@ -606,6 +631,8 @@ fn spawn_api_task_safe<T, Fut>
     }
   );
 }
+
+
 macro_rules! api_req {
   (GET, $url:expr, $resp_type:ty, $http:expr, $token:expr, $base_url:expr, $oauth:expr, $error_tx:expr) => {
     {
@@ -1027,7 +1054,6 @@ pub async fn fn_run_core
       }
 
       // ===== COMPLEX HANDLERS (CUSTOM LOGIC) =====
-      // ===== COMPLEX HANDLERS (CUSTOM LOGIC) =====
       Some((underlying, resp_tx)) = tfoot.get_option_chain.recv() =>
       { let http = http.clone();
         let shared_token = shared_token.clone();
@@ -1040,7 +1066,9 @@ pub async fn fn_run_core
             let dbgspt = "[TTRS_BOT_GET_OPTION_CHAIN]";
 
             // Current date as specified
-            let today = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(); // unwrap is safe for valid dates
+            let today = Utc::now(); 
+            //let today = Utc::now().date_naive().and_hms_opt(0, 0, 0).unwrap();  // or .with_timezone(&Utc) if needed
+            // let today = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(); // at least this compiled
 
             // Helper to parse "YYYY-MM-DD" into chrono::Date<Utc>
             let parse_date = |s: &str| -> Result<DateTime<Utc>> {
@@ -1156,6 +1184,8 @@ pub async fn fn_run_core
                 if !resp.status().is_success() {
                   return Err(anyhow::anyhow!("Futures option chain request failed: {}", resp.status()));
                 }
+
+
 
                 let body_text = resp.text().await.context("Failed to read response body")?;
                 let json: serde_json::Value = serde_json::from_str(&body_text)

@@ -1,6 +1,6 @@
 [package]
 name = "ttrs"
-version = "0.8.1"
+version = "0.8.3"
 edition = "2021"
 authors = ["Steven E. Elliott <seeyallc6c@gmail.com>"]
 
