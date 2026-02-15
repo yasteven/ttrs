@@ -10,27 +10,38 @@ but I can provide feedback to people who are interested in the code.
 Therefore, usage of this code pressposes zero liability by any party
 that experiences a financial loss from usage of the code conained: -
 
-TTRS is .
+TTRS is the tool I use for my own rust-based trading system. I made a
+lot of it with AI, so I need to Polish it up a bit once its stable to
+use confidently. 
 
-The following is ai generated:
+Almost all of the following is ai generated, but i update status from
+time to time:
 
-  nor this is a 
+
+TTRS is ...
 
 A comprehensive, high-performance Rust client library for the 
 Tastytrade API. Built from scratch with async-first design, robust 
 connection management, and targeting complete API coverage.
 
 **Current Status**
-: 0.8.1 (Integration Testing) 
 → 0.9.0 (Stabilization) 
+  NEXT:
+    - complete streams 0.9.1
+      ( full tests for account, unhook ticker streams, ticker timing)
+    - create strongly typed versions of things and use in (de)serialize 0.9.2..11+
+
 → 1.0.0 (Production Ready)
+  => vast majority of needed API coverage for basic tastytrade broker interaction - tickers, orders, account, etc. Implemented and tested in real-world trading systems
+  => completely strongly typed, but deserialize-safe via warnings when tastytrade API changes via expansion
+  => 100% async with two different available async paradigms (examples only have simple versions - higher performance is for consultation )  
 
 Change Status
-
+0.8.3: fixed futures options chain request for /ES
+0.8.2: fixed json arg text capitalization
 0.8.1: fixed a bug that prevented proper ticker subscriptions when
  using options streamer symbols
 
-0.8.2: TODO: will check rate settings for streaming
 
 TODO, profile update parsing needs to be fixed:
 

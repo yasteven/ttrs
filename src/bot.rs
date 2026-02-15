@@ -1,4 +1,5 @@
-// src/bot.rs
+
+// trade/ttrs/src/bot.rs
 //==================================================================
 // ttrs/src/bot.rs - Core logic, channels, and runtime functions
 //==================================================================
@@ -306,7 +307,7 @@ impl Thand // NOTE: although these functions are provided for convienence, optim
         .await
         .unwrap_or(()); // Fire-and-forget for streaming
   }
-  pub async fn tell_tasytrade_to_get_accounts_stream(&self, acct: String, user_tx: mpsc::Sender<Value>) 
+  pub async fn tell_tastytrade_to_get_accounts_stream(&self, acct: String, user_tx: mpsc::Sender<Value>) 
   { let (resp_tx, _resp_rx) = oneshot::channel();
     self.req_account_stream_tx
         .send((acct, user_tx, resp_tx))
@@ -1078,274 +1079,99 @@ pub async fn fn_run_core
                     .map_err(|e| anyhow::anyhow!("Invalid date format: {}", e))
             };
 
+            // Inside the get_option_chain handler, for the futures branch:
+
             if underlying.starts_with('/') {
-              log::trace!("{} Futures option chain request for {}", dbgspt, underlying);
+                log::trace!("{} Futures option chain request for {}", dbgspt, underlying);
 
-              // Extract product root code (e.g. "ES" from "/ESH6")
-              let mut root = underlying.trim_start_matches('/').to_string();
-
-              // Remove trailing year digits
-              while root.chars().last().map_or(false, |c| c.is_ascii_digit()) {
-                root.pop();
-              }
-              // Remove trailing month letter
-              if root.chars().last().map_or(false, |c| c.is_alphabetic()) {
-                root.pop();
-              }
-
-              log::debug!("{} Using detailed flat endpoint for root: {}", dbgspt, root);
-
-              // Use the detailed (non-nested) endpoint
-              let base_url = format!("{}/futures-option-chains/{}", conn.base_url, root);
-
-              // Build list of desired expiration dates
-              let mut desired_expirations = std::collections::HashSet::new();
-
-              let mut date = today + Duration::days(1);
-
-              // Next 2 months: daily business days (Mon-Fri)
-              let two_months = today + Duration::days(60);
-              while date < two_months {
-                if matches!(date.weekday(), Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri) {
-                  desired_expirations.insert(date);
+                // Extract root symbol (ES from /ESH6, /ES, etc.)
+                let mut root = underlying.trim_start_matches('/').to_string();
+                while root.chars().last().map_or(false, |c| c.is_ascii_digit()) {
+                    root.pop();
                 }
-                date += Duration::days(1);
-              }
-
-              // Next 2 months after that: Mon, Wed, Fri
-              let four_months = today + Duration::days(120);
-              while date < four_months {
-                if matches!(date.weekday(), Weekday::Mon | Weekday::Wed | Weekday::Fri) {
-                  desired_expirations.insert(date);
+                if root.chars().last().map_or(false, |c| c.is_alphabetic()) {
+                    root.pop();
                 }
-                date += Duration::days(1);
-              }
+                log::debug!("{} Root detected: {}", dbgspt, root);
 
-              // Next 2 months after that: Fridays only
-              let six_months = today + Duration::days(180);
-              while date < six_months {
-                if date.weekday() == Weekday::Fri {
-                  desired_expirations.insert(date);
-                }
-                date += Duration::days(1);
-              }
+                let url = format!("{}/futures-option-chains/{}/nested", conn.base_url, root);
 
-              // Monthlies (3rd Friday) for next 6 months beyond 6 months
-              let mut monthly_cursor = today + Duration::days(180);
-              let twelve_months_from_now = today + Duration::days(365 + 180);
-              while monthly_cursor < twelve_months_from_now {
-                let year = monthly_cursor.year();
-                let month = monthly_cursor.month();
-
-                let mut first_day = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap();
-
-                let today = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(); // unwrap is safe for valid dates
-
-                // Find first Friday
-                while first_day.weekday() != Weekday::Fri {
-                  first_day += Duration::days(1);
-                }
-                let third_friday = first_day + Duration::days(14); // 1st + 14 days = 3rd Friday
-
-                if third_friday >= today {
-                  desired_expirations.insert(third_friday);
-                }
-
-                // Next month
-                monthly_cursor = if month == 12 {
-                  Utc.with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0).unwrap()
-                } 
-                  else {
-                  Utc.with_ymd_and_hms(year, month+1, 1, 0, 0, 0).unwrap()
-                };
-              }
-
-              log::debug!("{} Generated {} desired expiration dates", dbgspt, desired_expirations.len());
-
-              // Pagination handling
-              let mut all_items = Vec::new();
-              let mut offset = 0;
-              let per_page = 500; // Max allowed; adjust if needed
-
-              loop {
-                let url = format!("{}?per-page={}&page-offset={}", base_url, per_page, offset);
-
-                log::debug!("{} Fetching page offset={} from {}", dbgspt, offset, url);
+                log::debug!("{} Fetching full futures option chain from: {}", dbgspt, url);
 
                 let token = ensure_token_resilient(&http, &conn.base_url, &conn.oauth, shared_token.clone(), error_tx.clone()).await?;
 
-                let resp = http.get(&url)
-                  .header(header::AUTHORIZATION, format!("Bearer {}", token))
-                  .header("User-Agent", "ttrs/1.0")
-                  .send()
-                  .await
-                  .context("Failed to fetch futures option chain page")?;
+                let resp = http
+                    .get(&url)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .header("User-Agent", "ttrs/1.0")
+                    .send()
+                    .await
+                    .context("Failed to fetch full futures option chain")?;
 
                 if !resp.status().is_success() {
-                  return Err(anyhow::anyhow!("Futures option chain request failed: {}", resp.status()));
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    log::error!("{} Full chain request failed: {} - {}", dbgspt, status, text);
+                    return Err(anyhow::anyhow!("Request failed: {} - {}", status, text));
                 }
 
+                let body_text = resp.text().await?;
+                log::debug!("{} Full chain response size: {} bytes", dbgspt, body_text.len());
+                log::trace!("{} Full chain raw response: {:.5500} ... [{}]", dbgspt, body_text, body_text.len());
 
+                let chain_resp: Value = serde_json::from_str(&body_text)
+                    .context("Failed to parse full chain JSON")?;
 
-                let body_text = resp.text().await.context("Failed to read response body")?;
-                let json: serde_json::Value = serde_json::from_str(&body_text)
-                  .context("Failed to parse JSON")?;
+                let option_chains = chain_resp["data"]["option-chains"]
+                    .as_array()
+                    .context("No 'data.option-chains' array in nested response")?;
 
-                let items = match json["data"]["items"].as_array() {
-                  Some(a) => a,
-                  None => return Err(anyhow::anyhow!("No items in response")),
+                if option_chains.is_empty() {
+                    log::warn!("{} Empty option-chains array", dbgspt);
+                    return Ok(OptionChainData { items: vec![], extra: HashMap::new() });
+                }
+
+                let mut all_expirations: Vec<OptionExpiration> = Vec::new();
+
+                for root_chain in option_chains {
+                    if let Some(expirations_arr) = root_chain["expirations"].as_array() {
+                        log::trace!("{} Found {} expiration(s) in this root", dbgspt, expirations_arr.len());
+                        for exp in expirations_arr {
+                            match serde_json::from_value::<OptionExpiration>(exp.clone()) {
+                                Ok(exp_obj) => {
+                                    all_expirations.push(exp_obj);
+                                }
+                                Err(e) => {
+                                    log::error!("{} Failed to deserialize expiration: {}", dbgspt, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Optional: sort by expiration date
+                all_expirations.sort_by_key(|e| e.expiration_date.clone());
+
+                log::info!("{} Collected {} expirations from full chain", dbgspt, all_expirations.len());
+
+                let root_obj = OptionChainRoot {
+                    root_symbol: root.to_uppercase(),
+                    underlying_symbol: underlying.to_string(),
+                    shares_per_contract: 50,           // /ES multiplier
+                    option_chain_type: "standard".to_string(),
+                    tick_sizes: vec![],
+                    deliverables: vec![],
+                    expirations: all_expirations,
+                    extra: HashMap::new(),
                 };
 
-                if items.is_empty() {
-                  break; // No more pages
-                }
+                let chain_data = OptionChainData {
+                    items: vec![root_obj],
+                    extra: HashMap::new(),
+                };
 
-                let mut page_filtered = Vec::new();
-
-                for item in items {
-                  if let Some(exp_str) = item["expiration-date"].as_str() {
-                    if let Ok(exp_date) = parse_date(exp_str) {
-                      if desired_expirations.contains(&exp_date) {
-                        // You may want to clone or map to your internal Option type here
-                        page_filtered.push(item.clone());
-                      }
-                    }
-                  }
-                }
-                let pfl = page_filtered.len();
-                all_items.extend(page_filtered);
-                log::debug!("{} Added {} filtered items from this page (total so far: {})", dbgspt, pfl, all_items.len());
-
-                // Check pagination
-                let total = json["pagination"]["total-items"].as_u64().unwrap_or(0);
-                if (offset + per_page) as u64 >= total {
-                  break;
-                }
-
-                offset += per_page;
-              }
-
-              log::info!("{} Successfully fetched and filtered {} futures options for {}", dbgspt, all_items.len(), underlying);
-
-              // // Construct final OptionChainData (adjust field names to match your struct)
-
-              use chrono::{DateTime, Utc};
-              use std::collections::{HashMap, BTreeMap};
-
-              // After collecting all_items: Vec<Value>
-
-              log::info!("{} Successfully fetched and filtered {} futures options for {}", dbgspt, all_items.len(), underlying);
-
-              // Group by expiration date first
-              let mut expirations_map: HashMap<String, (DateTime<Utc>, BTreeMap<String, (Value, Value)>)> = HashMap::new();
-
-              for item in all_items {
-                  let exp_date_str = match item["expiration-date"].as_str() {
-                      Some(s) => s,
-                      None => continue,
-                  };
-                  let strike = match item["strike-price"].as_str() {
-                      Some(s) => s.to_string(),
-                      None => continue,
-                  };
-
-                  let is_call = match item["option-type"].as_str() {
-                      Some("C") => true,
-                      Some("P") => false,
-                      _ => { log::warn!("TTRS - UNKNOWN OPTION TYPE for item {:#?}", item); continue; },
-                  };
-
-                  use serde_json::Value;
-                  let exp_entry = expirations_map
-                      .entry(exp_date_str.to_string())
-                      .or_insert_with(|| {
-                          let dt = parse_date(exp_date_str).expect("valid expiration date");
-                          (dt, BTreeMap::new())
-                      });
-
-                  let strike_entry = exp_entry.1 // the BTreeMap<String, (Value, Value)>
-                      .entry(strike)
-                      .or_insert((Value::Null, Value::Null));
-
-                  if is_call {
-                      strike_entry.0 = item.clone(); // replace call
-                  } else {
-                      strike_entry.1 = item.clone(); // replace put
-                  }
-              }
-
-              // Now build the nested structure
-              let mut expirations: Vec<OptionExpiration> = Vec::new();
-
-              for (exp_date_str, (exp_dt, strikes_map)) in expirations_map {
-                  let days_to_exp = (exp_dt - today).num_days() as u32;
-
-                  let mut strikes: Vec<Strike> = Vec::new();
-
-                  for (strike_price, (call_val, put_val)) in strikes_map {
-                      let call_symbol = call_val["symbol"].as_str().unwrap_or("");
-                      let call_streamer = call_val["streamer-symbol"].as_str().unwrap_or("");
-                      let put_symbol = put_val["symbol"].as_str().unwrap_or("");
-                      let put_streamer = put_val["streamer-symbol"].as_str().unwrap_or("");
-
-                      // Skip if missing one side (though you filtered to paired expirations)
-                      if call_symbol.is_empty() || put_symbol.is_empty() {
-                          continue;
-                      }
-
-                      strikes.push(Strike {
-                          strike_price: strike_price,
-                          call: call_symbol.to_string(),
-                          call_streamer_symbol: call_streamer.to_string(),
-                          put: put_symbol.to_string(),
-                          put_streamer_symbol: put_streamer.to_string(),
-                          extra: HashMap::new(),
-                      });
-                  }
-
-                  // Determine expiration type (simplified)
-                  let expiration_type = if exp_dt.weekday() == Weekday::Fri {
-                      "Weekly".to_string()
-                  } else {
-                      "Monthly".to_string()
-                  };
-
-                  // Settlement type — most ES are physical delivery via future
-                  let settlement_type = "Future".to_string();
-
-                  expirations.push(OptionExpiration {
-                      days_to_expiration: days_to_exp,
-                      expiration_date: exp_date_str,
-                      expiration_type,
-                      settlement_type,
-                      strikes,
-                      extra: HashMap::new(),
-                  });
-              }
-
-              // Sort expirations by date
-              expirations.sort_by_key(|e| e.expiration_date.clone());
-
-              // Build the root
-              let root = OptionChainRoot {
-                  root_symbol: "/ES".to_string(),
-                  underlying_symbol: underlying.to_string(),
-                  shares_per_contract: 50, // E-mini S&P 500 multiplier
-                  option_chain_type: "standard".to_string(),
-                  tick_sizes: vec![], // You can populate from future-product if needed
-                  deliverables: vec![],
-                  expirations,
-                  extra: HashMap::new(),
-              };
-
-              // Final response
-              let chain_data = OptionChainData {
-                  items: vec![root],
-                  extra: HashMap::new(),
-              };
-
-              Ok(chain_data)
-            } 
+                Ok(chain_data)
+            }
             else
             {
               // === EQUITY PATH (unchanged from original) ===
@@ -1367,7 +1193,7 @@ pub async fn fn_run_core
               }
 
               let body_text = reqwest_resp.text().await.context("Failed to read raw body")?;
-              log::trace!("{} Equity chain raw response: {:.200} ... [{}]", dbgspt, body_text, body_text.len());
+              log::trace!("{} Equity chain raw response: {:.2000} ... [{}]", dbgspt, body_text, body_text.len());
 
               let mut deserializer = serde_json::Deserializer::from_str(&body_text);
               let resp: OptionChainResponse = serde_path_to_error::deserialize(&mut deserializer)
@@ -2062,6 +1888,7 @@ async fn account_stream_loop_inner
     }
   );
 
+  log::debug!("[ACCOUNT_STREAM] Connected for account {}", acct);
   // Receive loop
   loop 
   {
@@ -2069,11 +1896,15 @@ async fn account_stream_loop_inner
     { match msg 
       { Ok(Message::Text(text)) => 
         { if let Ok(v) = serde_json::from_str::<Value>(&text) 
-          { // Filter notifications (no "status" key)
+          { log::trace!("[ACCOUNT_STREAM] Raw message: {}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            // Filter notifications (no "status" key)
             if v.get("status").is_none() && v.get("type").is_some() && v.get("data").is_some() 
             { if let Err(e) = user_tx.send(v).await 
               { return Err(anyhow::anyhow!("Failed to forward account stream data: {}", e));
               }
+            }
+            else
+            { log::trace!("[ACCOUNT_STREAM] message filtered out!");
             }
           }
         },

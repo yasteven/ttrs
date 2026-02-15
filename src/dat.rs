@@ -1,4 +1,5 @@
-// src/dat.rs
+
+// trade/ttrs/src/dat.rs
 // =============================================================================
 // ttrs/src/dat.rs - Tastytrade API Types (Nov 2025)
 // =============================================================================
@@ -811,6 +812,8 @@ pub struct OptionExpiration
   #[serde(rename = "settlement-type")]
   pub settlement_type: String,
   pub strikes: Vec<Strike>,
+  #[serde(default, rename = "tick-sizes")]  // ← ADD THIS
+  pub tick_sizes: Vec<TickSize>,            // ← For futures options
   #[serde(flatten)]
   pub extra : HashMap<String,Value>
 }
